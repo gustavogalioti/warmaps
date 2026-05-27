@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+⁶import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   auth, db,
   createUserWithEmailAndPassword,
@@ -12,7 +12,7 @@ import {
 // GOOGLE MAPS API KEY
 // Obtenha em: console.cloud.google.com → APIs → Maps JavaScript API
 // ============================================================
-const GMAPS_KEY = 'SUA_GOOGLE_MAPS_KEY'
+const GMAPS_KEY = AIzaSyB9oA-kZadFpaiZp5n84EstVWlYS8hQ5GQ
 
 // ============================================================
 // HELPERS
