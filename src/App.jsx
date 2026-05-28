@@ -795,7 +795,7 @@ export default function App(){
   const[toast,setToast]=useState(null)
   const[leaflet,setLeaflet]=useState(!!window.L)
   const[loadingNeighborhoods,setLoadingNeighborhoods]=useState(false)
-  const[syncStatus,setSyncStatus]=useState('')
+  const[neighborhoodStatus,setNeighborhoodStatus]=useState('idle')
   const geo=useGeo()
 
   useEffect(()=>{
@@ -821,7 +821,7 @@ export default function App(){
   },[user])
 
   // Auto-sync neighborhoods
-  const syncArea=useNeighborhoodSync(geo,user,setLoadingNeighborhoods,setSyncStatus)
+  const syncArea=useNeighborhoodSync(geo,user,setLoadingNeighborhoods,setNeighborhoodStatus)
 
   const toast$=(msg,type='ok')=>{setToast({msg,type});setTimeout(()=>setToast(null),4000)}
 
