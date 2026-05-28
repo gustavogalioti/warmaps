@@ -65,18 +65,44 @@ const I=({n,s=18,c='currentColor'})=>{
   return <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{d[n]}</svg>
 }
 
-// ── GPS hook ──────────────────────────────────────────────────
-const useGeo=()=>{
+// ── GPS + KM Tracker ─────────────────────────────────────────
+const useGeo=(user,onKmUpdate)=>{
   const[g,setG]=useState({lat:null,lng:null,acc:null,err:null,loading:true})
+  const lastPos=useRef(null)
+  const sessionKm=useRef(0)
+  const saveTimer=useRef(null)
+  const MIN_DIST=0.02  // min 20m to count movement
+  const MIN_ACC=50     // ignore if accuracy worse than 50m
+
   useEffect(()=>{
     if(!navigator.geolocation){setG(s=>({...s,err:'GPS não suportado.',loading:false}));return}
-    const ok=p=>setG({lat:p.coords.latitude,lng:p.coords.longitude,acc:p.coords.accuracy,err:null,loading:false})
+    const ok=p=>{
+      const {latitude:lat,longitude:lng,accuracy:acc}=p.coords
+      setG({lat,lng,acc,err:null,loading:false})
+      // Track km if user logged in and accuracy good
+      if(user&&acc<MIN_ACC&&lastPos.current){
+        const dist=hav(lastPos.current.lat,lastPos.current.lng,lat,lng)/1000 // km
+        if(dist>=MIN_DIST&&dist<0.5){ // between 20m and 500m (filter GPS jumps)
+          sessionKm.current+=dist
+          // Save to Firestore every 0.1km accumulated
+          if(saveTimer.current)clearTimeout(saveTimer.current)
+          saveTimer.current=setTimeout(async()=>{
+            const km=parseFloat(sessionKm.current.toFixed(3))
+            if(km>0&&onKmUpdate){
+              await onKmUpdate(km)
+              sessionKm.current=0
+            }
+          },3000) // wait 3s of no movement before saving
+        }
+      }
+      lastPos.current={lat,lng}
+    }
     const fail=e=>setG(s=>({...s,err:e.code===1?'Permissão de GPS negada.':'Localização indisponível.',loading:false}))
-    const opts={enableHighAccuracy:true,timeout:12000,maximumAge:4000}
+    const opts={enableHighAccuracy:true,timeout:12000,maximumAge:2000}
     navigator.geolocation.getCurrentPosition(ok,fail,opts)
     const id=navigator.geolocation.watchPosition(ok,fail,opts)
-    return()=>navigator.geolocation.clearWatch(id)
-  },[])
+    return()=>{navigator.geolocation.clearWatch(id);if(saveTimer.current)clearTimeout(saveTimer.current)}
+  },[user?.uid])
   return g
 }
 
@@ -796,7 +822,7 @@ export default function App(){
   const[leaflet,setLeaflet]=useState(!!window.L)
   const[loadingNeighborhoods,setLoadingNeighborhoods]=useState(false)
   const[neighborhoodStatus,setNeighborhoodStatus]=useState('idle')
-  const geo=useGeo()
+  const geo=useGeo(user,handleKmUpdate)
 
   useEffect(()=>{
     if(window.L){setLeaflet(true);return}
@@ -849,6 +875,32 @@ export default function App(){
     await deleteDoc(doc(db,'conquest_points',editingPoint.point.id))
     setEditingPoint(null);setSelected(null);toast$(`🗑️ Ponto removido.`,'ok')
   }
+
+  // Save KMs to Firestore and update user state
+  const handleKmUpdate=useCallback(async(km)=>{
+    if(!user||km<=0)return
+    try{
+      const newTotal=parseFloat(((user.km_total||0)+km).toFixed(3))
+      await updateDoc(doc(db,'profiles',user.uid),{km_total:newTotal})
+      setUser(u=>({...u,km_total:newTotal}))
+      // Also update owner_km on territories this user owns
+      const myPoints=points.filter(p=>p.owner_id===user.uid)
+      if(myPoints.length>0){
+        await Promise.all(myPoints.map(p=>
+          updateDoc(doc(db,'conquest_points',p.id),{owner_km:(p.owner_km||0)+km})
+        ))
+      }
+      // Update active battles where user is attacker or defender
+      const myBattles=battles.filter(b=>b.attacker_id===user.uid||b.defender_id===user.uid)
+      for(const b of myBattles){
+        if(b.attacker_id===user.uid){
+          await updateDoc(doc(db,'battles',b.id),{attacker_km:(b.attacker_km||0)+km})
+        }else{
+          await updateDoc(doc(db,'battles',b.id),{defender_km:(b.defender_km||0)+km})
+        }
+      }
+    }catch(e){console.error('KM save error:',e)}
+  },[user,points,battles])
 
   const handleClearAndResync=async()=>{
     if(!window.confirm('Apagar todos os bairros importados e reimportar? Os pontos manuais serão mantidos.'))return
