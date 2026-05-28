@@ -7,7 +7,7 @@ import {
   collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
   onSnapshot, query, where, orderBy, serverTimestamp,
 } from './firebase.js'
-import { fetchNeighborhoodsByLocation, detectCityByGPS } from './neighborhoods.js'
+import { fetchNeighborhoodsByLocation } from './neighborhoods.js'
 
 // ── helpers ───────────────────────────────────────────────────
 const hav=(a,b,c,d)=>{const R=6371000,x=(c-a)*Math.PI/180,y=(d-b)*Math.PI/180,s=Math.sin(x/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(y/2)**2;return R*2*Math.atan2(Math.sqrt(s),Math.sqrt(1-s))}
@@ -81,61 +81,54 @@ const useGeo=()=>{
 }
 
 // ── Neighborhood sync ─────────────────────────────────────────
-const useNeighborhoodSync=(geo,user,points,setLoadingNeighborhoods)=>{
-  const syncedCities=useRef(new Set())
+const useNeighborhoodSync=(geo,user,setLoadingNeighborhoods,setSyncStatus)=>{
+  const syncedRef=useRef(new Set())
 
-  const syncCity=useCallback(async(lat,lng)=>{
-    const cityKey=`${Math.round(lat*2)/2}_${Math.round(lng*2)/2}`
-    if(syncedCities.current.has(cityKey))return
-    syncedCities.current.add(cityKey)
+  const syncArea=useCallback(async(lat,lng,force=false)=>{
+    const key=`${(lat*4|0)/4}_${(lng*4|0)/4}`
+    if(!force&&syncedRef.current.has(key))return
+    syncedRef.current.add(key)
     setLoadingNeighborhoods(true)
+    setSyncStatus('Buscando bairros...')
     try{
-      // Get existing OSM point IDs
-      const existingSnap=await getDocs(collection(db,'conquest_points'))
-      const existingOsmIds=new Set(existingSnap.docs.map(d=>d.data().osm_id).filter(Boolean))
-      const existingCount=existingSnap.docs.length
-
-      console.log(`[WarMaps] Existing points: ${existingCount}, syncing area ${cityKey}`)
-
-      // Fetch neighborhoods
       const neighborhoods=await fetchNeighborhoodsByLocation(lat,lng)
-      console.log(`[WarMaps] OSM returned ${neighborhoods.length} neighborhoods`)
-
-      // Save new ones
-      const newOnes=neighborhoods.filter(n=>!existingOsmIds.has(n.osm_id))
-      console.log(`[WarMaps] New to save: ${newOnes.length}`)
-
-      // Save in parallel batches of 10
-      for(let i=0;i<Math.min(newOnes.length,60);i+=10){
-        const batch=newOnes.slice(i,i+10)
-        await Promise.all(batch.map(n=>addDoc(collection(db,'conquest_points'),{
-          ...n,
-          source:'osm',
-          owner_id:null,
-          owner_km:0,
-          created_at:serverTimestamp(),
-        })))
+      setSyncStatus(`${neighborhoods.length} bairros encontrados. Salvando...`)
+      if(neighborhoods.length===0){
+        setSyncStatus('Nenhum bairro encontrado nesta área')
+        setLoadingNeighborhoods(false)
+        return
       }
-      console.log(`[WarMaps] Sync complete`)
+      // Get existing osm_ids
+      const snap=await getDocs(collection(db,'conquest_points'))
+      const existing=new Set(snap.docs.map(d=>d.data().osm_id).filter(Boolean))
+      const news=neighborhoods.filter(n=>!existing.has(n.osm_id))
+      setSyncStatus(`Salvando ${news.length} novos bairros...`)
+      // Save in batches
+      for(let i=0;i<news.length;i+=10){
+        await Promise.all(news.slice(i,i+10).map(n=>
+          addDoc(collection(db,'conquest_points'),{...n,source:'osm',owner_id:null,owner_km:0,created_at:serverTimestamp()})
+        ))
+      }
+      setSyncStatus(`✅ ${news.length} bairros adicionados!`)
+      setTimeout(()=>setSyncStatus(''),3000)
     }catch(e){
-      console.error('[WarMaps] Sync error:',e)
-      // Remove from synced so it retries
-      syncedCities.current.delete(cityKey)
+      console.error('[WarMaps] sync error',e)
+      setSyncStatus('Erro ao buscar bairros. Tente novamente.')
+      syncedRef.current.delete(key)
     }
     setLoadingNeighborhoods(false)
   },[])
 
+  // Auto-sync when GPS arrives
   useEffect(()=>{
     if(!geo.lat||!user)return
-    syncCity(geo.lat,geo.lng)
-  },[geo.lat,geo.lng,user])
+    const t=setTimeout(()=>syncArea(geo.lat,geo.lng),2000)
+    return()=>clearTimeout(t)
+  },[geo.lat,user])
 
-  // Also sync user's profile city
-  useEffect(()=>{
-    if(!user?.city_lat||!user?.city_lng)return
-    syncCity(user.city_lat,user.city_lng)
-  },[user?.city_lat,user?.city_lng])
+  return syncArea
 }
+
 
 // ── Leaflet Map ───────────────────────────────────────────────
 const LeafletMap=({points,geo,profiles,selectedId,battles,addMode,onSelect,onMapClick})=>{
@@ -203,16 +196,21 @@ const LeafletMap=({points,geo,profiles,selectedId,battles,addMode,onSelect,onMap
 }
 
 // ── Neighborhood loading indicator ────────────────────────────
-const NeighborhoodLoader=({loading,count})=>{
-  if(!loading&&count>0)return null
+const NeighborhoodLoader=({loading,status,count,geo,onManualSync})=>{
   if(loading)return(
-    <div style={{position:'absolute',top:16,left:'50%',transform:'translateX(-50%)',background:'#fff',border:'1px solid #e2e8f0',borderRadius:20,padding:'7px 16px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:600,color:'#4f46e5',zIndex:1000,boxShadow:'0 2px 12px rgba(0,0,0,0.1)',whiteSpace:'nowrap'}}>
-      <I n="refresh" s={13} c="#4f46e5"/> Carregando bairros...
+    <div style={{position:'absolute',top:60,left:'50%',transform:'translateX(-50%)',background:'#fff',border:'1px solid #c7d2fe',borderRadius:20,padding:'8px 18px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:600,color:'#4f46e5',zIndex:1000,boxShadow:'0 2px 12px rgba(0,0,0,0.12)',whiteSpace:'nowrap',maxWidth:'90vw'}}>
+      <I n="refresh" s={13} c="#4f46e5"/>{status||'Buscando bairros...'}
     </div>
   )
-  if(count===0)return(
-    <div style={{position:'absolute',top:16,left:'50%',transform:'translateX(-50%)',background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:20,padding:'7px 16px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:600,color:'#d97706',zIndex:1000,boxShadow:'0 2px 12px rgba(0,0,0,0.1)',whiteSpace:'nowrap'}}>
-      <I n="warn" s={13} c="#d97706"/> Nenhum bairro encontrado nesta área
+  if(status&&!loading)return(
+    <div style={{position:'absolute',top:60,left:'50%',transform:'translateX(-50%)',background:status.startsWith('✅')?'#f0fdf4':'#fffbeb',border:`1px solid ${status.startsWith('✅')?'#86efac':'#fcd34d'}`,borderRadius:20,padding:'8px 18px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:600,color:status.startsWith('✅')?'#166534':'#92400e',zIndex:1000,boxShadow:'0 2px 12px rgba(0,0,0,0.12)',whiteSpace:'nowrap',maxWidth:'90vw'}}>
+      {status}
+    </div>
+  )
+  if(count===0&&geo?.lat&&!loading)return(
+    <div style={{position:'absolute',top:60,left:'50%',transform:'translateX(-50%)',background:'#fff',border:'1px solid #e2e8f0',borderRadius:20,padding:'8px 18px',display:'flex',alignItems:'center',gap:10,fontSize:12,fontWeight:600,color:'#64748b',zIndex:1000,boxShadow:'0 2px 12px rgba(0,0,0,0.1)',whiteSpace:'nowrap'}}>
+      <I n="warn" s={13} c="#d97706"/> Sem bairros
+      <button onClick={onManualSync} style={{background:'#4f46e5',border:'none',borderRadius:12,padding:'4px 12px',color:'#fff',cursor:'pointer',fontSize:11,fontWeight:700}}>Carregar</button>
     </div>
   )
   return null
@@ -492,8 +490,8 @@ const ProfileView=({user,points,onUpdate})=>{
   )
 }
 
-// ── Forum ─────────────────────────────────────────────────────
-const ForumView=({user,profiles})=>{
+// ── Forum ────────────────────────────────────────────────────
+const ForumView=({user})=>{
   const[posts,setPosts]=useState([])
   const[openPost,setOpenPost]=useState(null)
   const[comments,setComments]=useState([])
@@ -502,108 +500,216 @@ const ForumView=({user,profiles})=>{
   const[newComment,setNewComment]=useState('')
   const[showNew,setShowNew]=useState(false)
   const[posting,setPosting]=useState(false)
+  const[sendingComment,setSendingComment]=useState(false)
+  const commentsEndRef=useRef(null)
 
-  useEffect(()=>onSnapshot(query(collection(db,'forum_posts'),orderBy('created_at','desc')),s=>setPosts(s.docs.map(d=>({id:d.id,...d.data()})))),[])
+  useEffect(()=>onSnapshot(
+    query(collection(db,'forum_posts'),orderBy('created_at','desc')),
+    s=>setPosts(s.docs.map(d=>({id:d.id,...d.data()})))
+  ),[])
+
   useEffect(()=>{
     if(!openPost)return
-    return onSnapshot(query(collection(db,'forum_posts',openPost.id,'comments'),orderBy('created_at','asc')),s=>setComments(s.docs.map(d=>({id:d.id,...d.data()}))))
+    return onSnapshot(
+      query(collection(db,'forum_posts',openPost.id,'comments'),orderBy('created_at','asc')),
+      s=>{setComments(s.docs.map(d=>({id:d.id,...d.data()})));setTimeout(()=>commentsEndRef.current?.scrollIntoView({behavior:'smooth'}),100)}
+    )
   },[openPost?.id])
 
   const submitPost=async()=>{
-    if(!newTitle.trim()||!newBody.trim())return
+    if(!newTitle.trim()||!newBody.trim()||posting)return
     setPosting(true)
-    await addDoc(collection(db,'forum_posts'),{title:newTitle,body:newBody,author_id:user.uid,author_name:user.display_name,author_color:user.avatar_color,author_photo:user.photo_url||null,likes:[],created_at:serverTimestamp()})
+    await addDoc(collection(db,'forum_posts'),{
+      title:newTitle.trim(),body:newBody.trim(),
+      author_id:user.uid,author_name:user.display_name,
+      author_color:user.avatar_color,author_photo:user.photo_url||null,
+      likes:[],comment_count:0,created_at:serverTimestamp()
+    })
     setNewTitle('');setNewBody('');setShowNew(false);setPosting(false)
   }
 
   const submitComment=async()=>{
-    if(!newComment.trim()||!openPost)return
-    await addDoc(collection(db,'forum_posts',openPost.id,'comments'),{body:newComment,author_id:user.uid,author_name:user.display_name,author_color:user.avatar_color,author_photo:user.photo_url||null,created_at:serverTimestamp()})
+    if(!newComment.trim()||!openPost||sendingComment)return
+    setSendingComment(true)
+    await addDoc(collection(db,'forum_posts',openPost.id,'comments'),{
+      body:newComment.trim(),
+      author_id:user.uid,author_name:user.display_name,
+      author_color:user.avatar_color,author_photo:user.photo_url||null,
+      created_at:serverTimestamp()
+    })
+    await updateDoc(doc(db,'forum_posts',openPost.id),{comment_count:(openPost.comment_count||0)+1})
     setNewComment('')
+    setSendingComment(false)
   }
 
   const toggleLike=async(post,e)=>{
-    e.stopPropagation()
+    e?.stopPropagation()
     const likes=post.likes||[],has=likes.includes(user.uid)
     await updateDoc(doc(db,'forum_posts',post.id),{likes:has?likes.filter(x=>x!==user.uid):[...likes,user.uid]})
   }
 
-  const Avatar=({photo,color,name,size=36})=>photo?
-    <img src={photo} style={{width:size,height:size,borderRadius:'50%',objectFit:'cover',flexShrink:0}} alt=""/>:
-    <div style={{width:size,height:size,borderRadius:'50%',background:color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,color:'#fff',fontSize:size*0.45,flexShrink:0}}>{name?.charAt(0)||'?'}</div>
+  const Avatar=({photo,color,name,size=36})=>(
+    <div style={{width:size,height:size,borderRadius:'50%',overflow:'hidden',flexShrink:0,background:color||'#4f46e5'}}>
+      {photo
+        ?<img src={photo} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>
+        :<div style={{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,color:'#fff',fontSize:size*0.44}}>{name?.charAt(0)||'?'}</div>
+      }
+    </div>
+  )
 
-  const inp={width:'100%',padding:'10px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:13,outline:'none'}
-
+  // ── Open post view ─────────────────────────────────────────
   if(openPost)return(
     <div style={{display:'flex',flexDirection:'column',height:'100%',background:'#f8fafc'}}>
-      <div style={{padding:'14px 20px',background:'#fff',borderBottom:'1px solid #e2e8f0',display:'flex',alignItems:'center',gap:12,flexShrink:0}}>
-        <button onClick={()=>setOpenPost(null)} style={{background:'#f1f5f9',border:'none',borderRadius:8,padding:'6px 12px',cursor:'pointer',fontWeight:700,color:'#64748b',fontSize:13}}>← Voltar</button>
+      {/* Header */}
+      <div style={{padding:'12px 16px',background:'#fff',borderBottom:'1px solid #e2e8f0',display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
+        <button onClick={()=>{setOpenPost(null);setComments([])}} style={{background:'#f1f5f9',border:'none',borderRadius:8,padding:'7px 12px',cursor:'pointer',fontWeight:700,color:'#64748b',fontSize:13,display:'flex',alignItems:'center',gap:6}}>
+          <I n="x" s={14} c="#64748b"/> Fechar
+        </button>
         <div style={{fontSize:14,fontWeight:900,color:'#0f172a',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{openPost.title}</div>
       </div>
-      <div style={{flex:1,overflowY:'auto',padding:'16px 20px'}}>
-        <div style={{background:'#fff',borderRadius:16,padding:18,marginBottom:16,border:'1px solid #e2e8f0'}}>
+
+      {/* Scrollable content */}
+      <div style={{flex:1,overflowY:'auto',padding:'16px'}}>
+        {/* Original post card */}
+        <div style={{background:'#fff',borderRadius:16,padding:18,marginBottom:20,border:'1px solid #e2e8f0',boxShadow:'0 1px 4px rgba(0,0,0,0.05)'}}>
           <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:12}}>
             <Avatar photo={openPost.author_photo} color={openPost.author_color} name={openPost.author_name}/>
-            <div><div style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{openPost.author_name}</div><div style={{fontSize:11,color:'#94a3b8'}}>{fmtDate(openPost.created_at)}</div></div>
+            <div>
+              <div style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{openPost.author_name}</div>
+              <div style={{fontSize:11,color:'#94a3b8'}}>{fmtDate(openPost.created_at)}</div>
+            </div>
           </div>
-          <div style={{fontSize:14,color:'#334155',lineHeight:1.7}}>{openPost.body}</div>
-          <button onClick={e=>toggleLike(openPost,e)} style={{marginTop:12,background:'transparent',border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:6,fontSize:13,color:(openPost.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8',fontWeight:600}}>
-            <I n="heart" s={16} c={(openPost.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8'}/>{(openPost.likes||[]).length}
+          <div style={{fontSize:15,fontWeight:700,color:'#0f172a',marginBottom:8}}>{openPost.title}</div>
+          <div style={{fontSize:14,color:'#334155',lineHeight:1.7,marginBottom:14}}>{openPost.body}</div>
+          <button onClick={e=>toggleLike(openPost,e)} style={{background:'transparent',border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:6,fontSize:13,color:(openPost.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8',fontWeight:600,padding:0}}>
+            <I n="heart" s={16} c={(openPost.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8'}/>
+            {(openPost.likes||[]).length} curtidas
           </button>
         </div>
-        <div style={{fontSize:12,fontWeight:700,color:'#64748b',letterSpacing:1,marginBottom:12}}>{comments.length} COMENTÁRIOS</div>
+
+        {/* Comments header */}
+        <div style={{fontSize:12,fontWeight:700,color:'#64748b',letterSpacing:1,marginBottom:12,paddingLeft:4}}>
+          {comments.length} {comments.length===1?'COMENTÁRIO':'COMENTÁRIOS'}
+        </div>
+
+        {/* Comments list */}
+        {comments.length===0&&(
+          <div style={{textAlign:'center',padding:'20px 0',color:'#94a3b8',fontSize:13}}>
+            Nenhum comentário ainda. Seja o primeiro! 👇
+          </div>
+        )}
         {comments.map(c=>(
-          <div key={c.id} style={{background:'#fff',borderRadius:14,padding:14,marginBottom:10,border:'1px solid #e2e8f0'}}>
-            <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:8}}>
-              <Avatar photo={c.author_photo} color={c.author_color} name={c.author_name} size={30}/>
-              <div><div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{c.author_name}</div><div style={{fontSize:10,color:'#94a3b8'}}>{fmtDate(c.created_at)}</div></div>
+          <div key={c.id} style={{display:'flex',gap:10,marginBottom:14,alignItems:'flex-start'}}>
+            <Avatar photo={c.author_photo} color={c.author_color} name={c.author_name} size={34}/>
+            <div style={{flex:1}}>
+              <div style={{background:'#fff',borderRadius:14,borderTopLeftRadius:4,padding:'10px 14px',border:'1px solid #e2e8f0'}}>
+                <div style={{fontSize:12,fontWeight:700,color:'#0f172a',marginBottom:4}}>{c.author_name}</div>
+                <div style={{fontSize:13,color:'#334155',lineHeight:1.6}}>{c.body}</div>
+              </div>
+              <div style={{fontSize:10,color:'#94a3b8',marginTop:4,paddingLeft:4}}>{fmtDate(c.created_at)}</div>
             </div>
-            <div style={{fontSize:13,color:'#334155',lineHeight:1.6}}>{c.body}</div>
           </div>
         ))}
+        <div ref={commentsEndRef}/>
       </div>
-      <div style={{padding:'12px 16px',background:'#fff',borderTop:'1px solid #e2e8f0',display:'flex',gap:8,flexShrink:0}}>
-        <input style={{...inp,flex:1}} placeholder="Escreva um comentário..." value={newComment} onChange={e=>setNewComment(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submitComment()}/>
-        <button onClick={submitComment} disabled={!newComment.trim()} style={{padding:'10px 14px',borderRadius:10,border:'none',background:newComment.trim()?'#4f46e5':'#e2e8f0',color:newComment.trim()?'#fff':'#94a3b8',cursor:newComment.trim()?'pointer':'not-allowed'}}>
-          <I n="send" s={16} c={newComment.trim()?'#fff':'#94a3b8'}/>
-        </button>
+
+      {/* Comment input — always visible at bottom */}
+      <div style={{background:'#fff',borderTop:'1px solid #e2e8f0',padding:'10px 16px',flexShrink:0}}>
+        <div style={{display:'flex',gap:10,alignItems:'flex-end'}}>
+          <Avatar photo={user.photo_url} color={user.avatar_color} name={user.display_name} size={36}/>
+          <div style={{flex:1,background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:20,display:'flex',alignItems:'center',overflow:'hidden',paddingLeft:14}}>
+            <input
+              value={newComment}
+              onChange={e=>setNewComment(e.target.value)}
+              onKeyDown={e=>e.key==='Enter'&&!e.shiftKey&&submitComment()}
+              placeholder="Escreva um comentário..."
+              style={{flex:1,border:'none',background:'transparent',outline:'none',fontSize:14,color:'#0f172a',padding:'10px 0'}}
+            />
+            <button
+              onClick={submitComment}
+              disabled={!newComment.trim()||sendingComment}
+              style={{background:newComment.trim()?'#4f46e5':'transparent',border:'none',borderRadius:20,margin:4,padding:'8px 14px',cursor:newComment.trim()?'pointer':'default',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.2s'}}
+            >
+              <I n="send" s={16} c={newComment.trim()?'#fff':'#cbd5e1'}/>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   )
 
+  // ── Posts list ─────────────────────────────────────────────
   return(
     <div style={{display:'flex',flexDirection:'column',height:'100%',background:'#f8fafc'}}>
-      <div style={{padding:'20px 20px 0',flexShrink:0}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-          <div><div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:4}}>COMUNIDADE</div><div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>Fórum</div></div>
+      {/* Header */}
+      <div style={{padding:'20px 20px 12px',background:'#f8fafc',flexShrink:0}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div>
+            <div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:2}}>COMUNIDADE</div>
+            <div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>Fórum</div>
+          </div>
           <button onClick={()=>setShowNew(!showNew)} style={{padding:'9px 16px',borderRadius:12,border:'none',background:'#4f46e5',color:'#fff',cursor:'pointer',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',gap:6}}>
-            <I n="plus" s={14} c="#fff"/> Novo post
+            <I n="plus" s={14} c="#fff"/>{showNew?'Cancelar':'Novo post'}
           </button>
         </div>
-        {showNew&&<div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:18,marginBottom:16}}>
-          <input style={{...inp,marginBottom:10,display:'block'}} placeholder="Título" value={newTitle} onChange={e=>setNewTitle(e.target.value)}/>
-          <textarea style={{...inp,resize:'none',height:80,fontFamily:'inherit',display:'block',marginBottom:10}} placeholder="Escreva sua mensagem..." value={newBody} onChange={e=>setNewBody(e.target.value)}/>
-          <div style={{display:'flex',gap:8}}>
-            <button onClick={()=>setShowNew(false)} style={{flex:1,padding:'10px',borderRadius:10,background:'#f1f5f9',border:'none',color:'#64748b',cursor:'pointer',fontWeight:700}}>Cancelar</button>
-            <button onClick={submitPost} disabled={posting||!newTitle.trim()||!newBody.trim()} style={{flex:2,padding:'10px',borderRadius:10,background:newTitle.trim()&&newBody.trim()?'#4f46e5':'#c7d2fe',border:'none',color:'#fff',cursor:'pointer',fontWeight:900}}>{posting?'Publicando...':'Publicar'}</button>
+
+        {/* New post form */}
+        {showNew&&(
+          <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:18,marginTop:14}}>
+            <div style={{display:'flex',gap:10,marginBottom:12,alignItems:'center'}}>
+              <Avatar photo={user.photo_url} color={user.avatar_color} name={user.display_name} size={36}/>
+              <div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{user.display_name}</div>
+            </div>
+            <input
+              style={{width:'100%',padding:'10px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:14,outline:'none',marginBottom:10,fontWeight:600}}
+              placeholder="Título do post"
+              value={newTitle}
+              onChange={e=>setNewTitle(e.target.value)}
+            />
+            <textarea
+              style={{width:'100%',padding:'10px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:13,outline:'none',resize:'none',height:80,fontFamily:'inherit',display:'block'}}
+              placeholder="Escreva sua mensagem..."
+              value={newBody}
+              onChange={e=>setNewBody(e.target.value)}
+            />
+            <div style={{display:'flex',gap:8,marginTop:12}}>
+              <button onClick={()=>{setShowNew(false);setNewTitle('');setNewBody('')}} style={{flex:1,padding:'10px',borderRadius:10,background:'#f1f5f9',border:'none',color:'#64748b',cursor:'pointer',fontWeight:700}}>Cancelar</button>
+              <button onClick={submitPost} disabled={posting||!newTitle.trim()||!newBody.trim()} style={{flex:2,padding:'10px',borderRadius:10,background:newTitle.trim()&&newBody.trim()?'#4f46e5':'#c7d2fe',border:'none',color:'#fff',cursor:'pointer',fontWeight:900}}>
+                {posting?'Publicando...':'Publicar'}
+              </button>
+            </div>
           </div>
-        </div>}
+        )}
       </div>
-      <div style={{flex:1,overflowY:'auto',padding:'0 20px 24px'}}>
-        {posts.length===0&&<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:40}}>Nenhum post ainda.</div>}
+
+      {/* Posts */}
+      <div style={{flex:1,overflowY:'auto',padding:'0 16px 24px'}}>
+        {posts.length===0&&<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:40}}>Nenhum post ainda. Seja o primeiro!</div>}
         {posts.map(p=>(
-          <div key={p.id} onClick={()=>setOpenPost(p)} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:18,marginBottom:12,cursor:'pointer',boxShadow:'0 1px 4px rgba(0,0,0,0.05)'}}>
+          <div key={p.id} onClick={()=>setOpenPost(p)} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:16,marginBottom:12,cursor:'pointer',boxShadow:'0 1px 4px rgba(0,0,0,0.05)',active:{background:'#f8fafc'}}}>
+            {/* Author */}
             <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:10}}>
               <Avatar photo={p.author_photo} color={p.author_color} name={p.author_name}/>
-              <div style={{flex:1,minWidth:0}}><div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{p.author_name}</div><div style={{fontSize:11,color:'#94a3b8'}}>{fmtDate(p.created_at)}</div></div>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{p.author_name}</div>
+                <div style={{fontSize:11,color:'#94a3b8'}}>{fmtDate(p.created_at)}</div>
+              </div>
             </div>
+            {/* Content */}
             <div style={{fontSize:15,fontWeight:700,color:'#0f172a',marginBottom:6}}>{p.title}</div>
-            <div style={{fontSize:13,color:'#64748b',lineHeight:1.5,display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden'}}>{p.body}</div>
-            <div style={{display:'flex',gap:16,marginTop:12,fontSize:12,color:'#94a3b8'}}>
-              <button onClick={e=>toggleLike(p,e)} style={{background:'transparent',border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:4,color:(p.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8',fontWeight:600,padding:0}}>
-                <I n="heart" s={14} c={(p.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8'}/>{(p.likes||[]).length}
+            <div style={{fontSize:13,color:'#64748b',lineHeight:1.5,display:'-webkit-box',WebkitLineClamp:3,WebkitBoxOrient:'vertical',overflow:'hidden'}}>{p.body}</div>
+            {/* Footer */}
+            <div style={{display:'flex',gap:16,marginTop:12,paddingTop:12,borderTop:'1px solid #f1f5f9',fontSize:13}}>
+              <button
+                onClick={e=>toggleLike(p,e)}
+                style={{background:'transparent',border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:5,color:(p.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8',fontWeight:600,padding:0,fontSize:13}}
+              >
+                <I n="heart" s={15} c={(p.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8'}/>{(p.likes||[]).length}
               </button>
-              <span style={{display:'flex',alignItems:'center',gap:4}}><I n="msg" s={14}/>comentários</span>
+              <span style={{display:'flex',alignItems:'center',gap:5,color:'#94a3b8'}}>
+                <I n="msg" s={15} c="#94a3b8"/>{p.comment_count||0} comentários
+              </span>
+              <span style={{marginLeft:'auto',color:'#4f46e5',fontWeight:700,fontSize:12}}>Ver →</span>
             </div>
           </div>
         ))}
@@ -611,6 +717,7 @@ const ForumView=({user,profiles})=>{
     </div>
   )
 }
+
 
 // ── Auth ──────────────────────────────────────────────────────
 const Auth=({onAuth})=>{
@@ -688,6 +795,7 @@ export default function App(){
   const[toast,setToast]=useState(null)
   const[leaflet,setLeaflet]=useState(!!window.L)
   const[loadingNeighborhoods,setLoadingNeighborhoods]=useState(false)
+  const[syncStatus,setSyncStatus]=useState('')
   const geo=useGeo()
 
   useEffect(()=>{
@@ -713,7 +821,7 @@ export default function App(){
   },[user])
 
   // Auto-sync neighborhoods
-  useNeighborhoodSync(geo,user,points,setLoadingNeighborhoods)
+  const syncArea=useNeighborhoodSync(geo,user,setLoadingNeighborhoods,setSyncStatus)
 
   const toast$=(msg,type='ok')=>{setToast({msg,type});setTimeout(()=>setToast(null),4000)}
 
@@ -790,7 +898,7 @@ export default function App(){
         {tab==='map'&&<>
           {leaflet?<LeafletMap points={points} geo={geo} profiles={profiles} selectedId={selected?.id} battles={battles} addMode={addMode} onSelect={setSelected} onMapClick={({lat,lng})=>{setEditingPoint({lat,lng});setAddMode(false)}}/>:<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',color:'#94a3b8'}}>Carregando mapa...</div>}
           <GeoBar geo={geo}/>
-          <NeighborhoodLoader loading={loadingNeighborhoods} count={points.length}/>
+          <NeighborhoodLoader loading={loadingNeighborhoods} status={syncStatus} count={points.length} geo={geo} onManualSync={()=>geo.lat&&syncArea(geo.lat,geo.lng,true)}/>
           {user.is_admin&&<button onClick={()=>{setAddMode(!addMode);setEditingPoint(null)}} style={{position:'absolute',top:16,left:16,background:addMode?'#4f46e5':'#fff',border:`2px solid ${addMode?'#4f46e5':'#e2e8f0'}`,borderRadius:12,color:addMode?'#fff':'#64748b',cursor:'pointer',padding:'9px 16px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:700,boxShadow:'0 2px 8px rgba(0,0,0,0.1)',zIndex:1000}}>
             <I n="plus" s={14} c={addMode?'#fff':'#64748b'}/>{addMode?'Clique no mapa...':'+ Ponto'}
           </button>}
@@ -873,7 +981,7 @@ export default function App(){
           {Object.keys(profiles).length===0&&<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:40}}>Nenhum jogador ainda.</div>}
         </div>}
 
-        {tab==='forum'&&<div style={{height:'100%',display:'flex',flexDirection:'column'}}><ForumView user={user} profiles={profiles}/></div>}
+        {tab==='forum'&&<div style={{height:'100%',display:'flex',flexDirection:'column'}}><ForumView user={user}/></div>}
         {tab==='profile'&&<ProfileView user={user} points={points} onUpdate={u=>{setUser(u);setProfiles(p=>({...p,[u.uid]:u}))}}/>}
 
         {toast&&<div style={{position:'absolute',bottom:20,left:'50%',transform:'translateX(-50%)',background:t.bg,border:`1px solid ${t.bo}`,borderRadius:12,padding:'12px 20px',zIndex:2000,fontSize:13,fontWeight:600,color:t.tx,boxShadow:'0 8px 32px rgba(0,0,0,0.12)',whiteSpace:'nowrap',animation:'su 0.3s ease'}}>{toast.msg}</div>}
