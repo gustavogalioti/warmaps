@@ -14,6 +14,7 @@ import {
   setDoc,
   addDoc,
   updateDoc,
+  deleteDoc,
   onSnapshot,
   query,
   where,
@@ -40,6 +41,6 @@ export {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   onAuthStateChanged,
-  collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc,
+  collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
   onSnapshot, query, where, orderBy, limit, serverTimestamp,
 }
