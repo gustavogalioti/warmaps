@@ -81,7 +81,7 @@ const useGeo=()=>{
 }
 
 // ── Neighborhood sync ─────────────────────────────────────────
-const useNeighborhoodSync=(geo,user,setLoadingNeighborhoods,setSyncStatus)=>{
+const useNeighborhoodSync=(geo,user,setLoadingNeighborhoods,setNeighborhoodStatus)=>{
   const syncedRef=useRef(new Set())
 
   const syncArea=useCallback(async(lat,lng,force=false)=>{
@@ -89,12 +89,12 @@ const useNeighborhoodSync=(geo,user,setLoadingNeighborhoods,setSyncStatus)=>{
     if(!force&&syncedRef.current.has(key))return
     syncedRef.current.add(key)
     setLoadingNeighborhoods(true)
-    setSyncStatus('Buscando bairros...')
+    setNeighborhoodStatus('Buscando bairros...')
     try{
       const neighborhoods=await fetchNeighborhoodsByLocation(lat,lng)
-      setSyncStatus(`${neighborhoods.length} bairros encontrados. Salvando...`)
+      setNeighborhoodStatus(`${neighborhoods.length} bairros encontrados. Salvando...`)
       if(neighborhoods.length===0){
-        setSyncStatus('Nenhum bairro encontrado nesta área')
+        setNeighborhoodStatus('Nenhum bairro encontrado nesta área')
         setLoadingNeighborhoods(false)
         return
       }
@@ -102,18 +102,18 @@ const useNeighborhoodSync=(geo,user,setLoadingNeighborhoods,setSyncStatus)=>{
       const snap=await getDocs(collection(db,'conquest_points'))
       const existing=new Set(snap.docs.map(d=>d.data().osm_id).filter(Boolean))
       const news=neighborhoods.filter(n=>!existing.has(n.osm_id))
-      setSyncStatus(`Salvando ${news.length} novos bairros...`)
+      setNeighborhoodStatus(`Salvando ${news.length} novos bairros...`)
       // Save in batches
       for(let i=0;i<news.length;i+=10){
         await Promise.all(news.slice(i,i+10).map(n=>
           addDoc(collection(db,'conquest_points'),{...n,source:'osm',owner_id:null,owner_km:0,created_at:serverTimestamp()})
         ))
       }
-      setSyncStatus(`✅ ${news.length} bairros adicionados!`)
-      setTimeout(()=>setSyncStatus(''),3000)
+      setNeighborhoodStatus(`✅ ${news.length} bairros adicionados!`)
+      setTimeout(()=>setNeighborhoodStatus(''),3000)
     }catch(e){
       console.error('[WarMaps] sync error',e)
-      setSyncStatus('Erro ao buscar bairros. Tente novamente.')
+      setNeighborhoodStatus('Erro ao buscar bairros. Tente novamente.')
       syncedRef.current.delete(key)
     }
     setLoadingNeighborhoods(false)
@@ -898,7 +898,7 @@ export default function App(){
         {tab==='map'&&<>
           {leaflet?<LeafletMap points={points} geo={geo} profiles={profiles} selectedId={selected?.id} battles={battles} addMode={addMode} onSelect={setSelected} onMapClick={({lat,lng})=>{setEditingPoint({lat,lng});setAddMode(false)}}/>:<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',color:'#94a3b8'}}>Carregando mapa...</div>}
           <GeoBar geo={geo}/>
-          <NeighborhoodLoader loading={loadingNeighborhoods} status={syncStatus} count={points.length} geo={geo} onManualSync={()=>geo.lat&&syncArea(geo.lat,geo.lng,true)}/>
+          <NeighborhoodLoader loading={loadingNeighborhoods} status={neighborhoodStatus} count={points.length} geo={geo} onManualSync={()=>geo.lat&&syncArea(geo.lat,geo.lng,true)}/>
           {user.is_admin&&<button onClick={()=>{setAddMode(!addMode);setEditingPoint(null)}} style={{position:'absolute',top:16,left:16,background:addMode?'#4f46e5':'#fff',border:`2px solid ${addMode?'#4f46e5':'#e2e8f0'}`,borderRadius:12,color:addMode?'#fff':'#64748b',cursor:'pointer',padding:'9px 16px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:700,boxShadow:'0 2px 8px rgba(0,0,0,0.1)',zIndex:1000}}>
             <I n="plus" s={14} c={addMode?'#fff':'#64748b'}/>{addMode?'Clique no mapa...':'+ Ponto'}
           </button>}
