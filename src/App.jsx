@@ -850,6 +850,21 @@ export default function App(){
     setEditingPoint(null);setSelected(null);toast$(`🗑️ Ponto removido.`,'ok')
   }
 
+  const handleClearAndResync=async()=>{
+    if(!window.confirm('Apagar todos os bairros importados e reimportar? Os pontos manuais serão mantidos.'))return
+    toast$('🗑️ Limpando pontos antigos...','warn')
+    // Delete all auto-imported points (source: osm, muni, brasil-aberto)
+    const snap=await getDocs(collection(db,'conquest_points'))
+    const toDelete=snap.docs.filter(d=>{
+      const src=d.data().source
+      return src==='osm'||src==='municipios-fallback'||src==='brasil-aberto'||src==='nominatim'||src==='muni'||d.data().osm_id?.startsWith('muni_')||d.data().osm_id?.startsWith('grid_')
+    })
+    await Promise.all(toDelete.map(d=>deleteDoc(doc(db,'conquest_points',d.id))))
+    toast$(`✅ ${toDelete.length} pontos removidos. Reimportando...`,'ok')
+    // Force resync
+    if(geo.lat) syncArea(geo.lat,geo.lng,true)
+  }
+
   const nearby=geo.lat?points.filter(p=>hav(geo.lat,geo.lng,p.lat,p.lng)<2000):[]
   const tc={ok:{bg:'#f0fdf4',bo:'#86efac',tx:'#166534'},err:{bg:'#fef2f2',bo:'#fca5a5',tx:'#991b1b'},warn:{bg:'#fffbeb',bo:'#fcd34d',tx:'#92400e'}}
   const t=tc[toast?.type]||tc.ok
@@ -899,9 +914,14 @@ export default function App(){
           {leaflet?<LeafletMap points={points} geo={geo} profiles={profiles} selectedId={selected?.id} battles={battles} addMode={addMode} onSelect={setSelected} onMapClick={({lat,lng})=>{setEditingPoint({lat,lng});setAddMode(false)}}/>:<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',color:'#94a3b8'}}>Carregando mapa...</div>}
           <GeoBar geo={geo}/>
           <NeighborhoodLoader loading={loadingNeighborhoods} status={neighborhoodStatus} count={points.length} geo={geo} onManualSync={()=>geo.lat&&syncArea(geo.lat,geo.lng,true)}/>
-          {user.is_admin&&<button onClick={()=>{setAddMode(!addMode);setEditingPoint(null)}} style={{position:'absolute',top:16,left:16,background:addMode?'#4f46e5':'#fff',border:`2px solid ${addMode?'#4f46e5':'#e2e8f0'}`,borderRadius:12,color:addMode?'#fff':'#64748b',cursor:'pointer',padding:'9px 16px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:700,boxShadow:'0 2px 8px rgba(0,0,0,0.1)',zIndex:1000}}>
-            <I n="plus" s={14} c={addMode?'#fff':'#64748b'}/>{addMode?'Clique no mapa...':'+ Ponto'}
-          </button>}
+          {user.is_admin&&<div style={{position:'absolute',top:16,left:16,display:'flex',gap:8,zIndex:1000}}>
+            <button onClick={()=>{setAddMode(!addMode);setEditingPoint(null)}} style={{background:addMode?'#4f46e5':'#fff',border:`2px solid ${addMode?'#4f46e5':'#e2e8f0'}`,borderRadius:12,color:addMode?'#fff':'#64748b',cursor:'pointer',padding:'9px 16px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:700,boxShadow:'0 2px 8px rgba(0,0,0,0.1)'}}>
+              <I n="plus" s={14} c={addMode?'#fff':'#64748b'}/>{addMode?'Clique no mapa...':'+ Ponto'}
+            </button>
+            <button onClick={handleClearAndResync} style={{background:'#f0fdf4',border:'2px solid #86efac',borderRadius:12,color:'#166534',cursor:'pointer',padding:'9px 14px',display:'flex',alignItems:'center',gap:6,fontSize:12,fontWeight:700,boxShadow:'0 2px 8px rgba(0,0,0,0.1)'}}>
+              <I n="refresh" s={14} c="#166534"/> Reimportar bairros
+            </button>
+          </div>}
           <Panel point={selected} geo={geo} user={user} battles={battles} profiles={profiles} onBattle={handleBattle} onCheckin={handleCheckin} onClose={()=>setSelected(null)} onEdit={pt=>setEditingPoint({point:pt})}/>
         </>}
 
