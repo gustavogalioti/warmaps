@@ -1,89 +1,90 @@
-// ── Neighborhood loader ───────────────────────────────────────
-// Usa múltiplos servidores Overpass como fallback
+// ── Neighborhood loader via OpenStreetMap Overpass ────────────
 
-const OVERPASS_SERVERS = [
+const SERVERS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
   'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
 ]
 
-const radiusForType = (type) => {
-  if (type === 'CIDADE') return 1500
-  if (type === 'AREA')   return 800
-  if (type === 'BAIRRO') return 350
-  return 200
-}
-
-async function overpassQuery(queryStr) {
-  for (const server of OVERPASS_SERVERS) {
+async function runQuery(q) {
+  for (const url of SERVERS) {
     try {
-      const res = await fetch(server, {
+      const res = await fetch(url, {
         method: 'POST',
-        body: `data=${encodeURIComponent(queryStr)}`,
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        signal: AbortSignal.timeout(20000),
+        body: 'data=' + encodeURIComponent(q),
+        signal: AbortSignal.timeout(25000),
       })
-      if (!res.ok) continue
+      if (!res.ok) { console.warn('[OSM] Server', url, 'returned', res.status); continue }
       const data = await res.json()
-      if (data.elements) return data.elements
+      if (Array.isArray(data.elements)) return data.elements
     } catch (e) {
-      console.warn(`Overpass ${server} failed:`, e.message)
+      console.warn('[OSM] Server failed:', url, e.message)
     }
   }
   return []
 }
 
-// Busca bairros por GPS (raio de 25km)
 export async function fetchNeighborhoodsByLocation(lat, lng) {
-  const query = `
-[out:json][timeout:30];
+  // Query tuned for Brazilian cities - uses suburb/neighbourhood/district tags
+  const q = `[out:json][timeout:30];
 (
-  node["place"~"^(suburb|neighbourhood|quarter)$"](around:25000,${lat},${lng});
-  way["place"~"^(suburb|neighbourhood|quarter)$"](around:25000,${lat},${lng});
-  relation["boundary"="administrative"]["admin_level"~"^(9|10)$"](around:25000,${lat},${lng});
+  node["place"~"^(suburb|neighbourhood|district|quarter|village|town)$"](around:30000,${lat},${lng});
+  way["place"~"^(suburb|neighbourhood|district|quarter)$"](around:30000,${lat},${lng});
+  relation["place"~"^(suburb|neighbourhood|district)$"](around:30000,${lat},${lng});
+  relation["boundary"="administrative"]["admin_level"~"^[89]$"](around:20000,${lat},${lng});
 );
 out center tags;`
 
-  const elements = await overpassQuery(query)
-  return parseElements(elements)
+  console.log('[OSM] Querying neighborhoods around', lat, lng)
+  const elements = await runQuery(q)
+  console.log('[OSM] Raw elements:', elements.length)
+
+  const result = parse(elements)
+  console.log('[OSM] Parsed neighborhoods:', result.length)
+  return result
 }
 
-function parseElements(elements) {
+function parse(elements) {
   const seen = new Set()
-  const result = []
+  const out = []
 
   for (const el of elements) {
-    const name = el.tags?.name || el.tags?.['name:pt']
+    const name =
+      el.tags?.name ||
+      el.tags?.['name:pt'] ||
+      el.tags?.['addr:suburb']
     if (!name || name.length < 2) continue
-    if (seen.has(name.toLowerCase())) continue
-    seen.add(name.toLowerCase())
 
-    const lat = el.center?.lat ?? el.lat
-    const lng = el.center?.lon ?? el.lon
+    const key = name.toLowerCase().trim()
+    if (seen.has(key)) continue
+    seen.add(key)
+
+    const lat = parseFloat(el.center?.lat ?? el.lat ?? 0)
+    const lng = parseFloat(el.center?.lon ?? el.lon ?? 0)
     if (!lat || !lng) continue
-
-    // Skip if coords are 0,0 or clearly wrong
-    if (Math.abs(lat) < 0.01 && Math.abs(lng) < 0.01) continue
+    if (Math.abs(lat) < 0.001) continue
 
     const place = el.tags?.place || ''
-    const adminLevel = parseInt(el.tags?.admin_level || '10')
+    const adminLevel = parseInt(el.tags?.admin_level || '99')
 
     let type = 'BAIRRO'
-    if (place === 'quarter') type = 'QUARTEIRAO'
-    else if (adminLevel <= 8) type = 'AREA'
-    else type = 'BAIRRO'
+    if (place === 'village' || place === 'town' || adminLevel === 8) type = 'AREA'
+    else if (place === 'quarter') type = 'QUARTEIRAO'
 
-    result.push({
+    const radius = type === 'AREA' ? 700 : type === 'QUARTEIRAO' ? 200 : 350
+
+    out.push({
       osm_id: `osm_${el.type}_${el.id}`,
-      name,
-      city: el.tags?.['addr:city'] || '',
+      name: name.trim(),
+      city: el.tags?.['addr:city'] || el.tags?.['is_in:city'] || '',
       type,
-      lat: parseFloat(lat.toFixed(6)),
-      lng: parseFloat(lng.toFixed(6)),
-      radius_m: radiusForType(type),
+      lat: Math.round(lat * 1e6) / 1e6,
+      lng: Math.round(lng * 1e6) / 1e6,
+      radius_m: radius,
       base_points: type === 'AREA' ? 300 : 100,
     })
   }
 
-  return result
+  return out
 }

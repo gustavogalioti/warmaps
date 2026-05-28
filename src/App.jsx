@@ -85,31 +85,43 @@ const useNeighborhoodSync=(geo,user,points,setLoadingNeighborhoods)=>{
   const syncedCities=useRef(new Set())
 
   const syncCity=useCallback(async(lat,lng)=>{
-    const cityKey=`${Math.round(lat*10)/10}_${Math.round(lng*10)/10}`
+    const cityKey=`${Math.round(lat*2)/2}_${Math.round(lng*2)/2}`
     if(syncedCities.current.has(cityKey))return
     syncedCities.current.add(cityKey)
     setLoadingNeighborhoods(true)
     try{
-      // Get existing OSM point IDs from Firestore
-      const existingSnap=await getDocs(query(collection(db,'conquest_points'),where('source','==','osm')))
+      // Get existing OSM point IDs
+      const existingSnap=await getDocs(collection(db,'conquest_points'))
       const existingOsmIds=new Set(existingSnap.docs.map(d=>d.data().osm_id).filter(Boolean))
+      const existingCount=existingSnap.docs.length
 
-      // Fetch neighborhoods from OSM
+      console.log(`[WarMaps] Existing points: ${existingCount}, syncing area ${cityKey}`)
+
+      // Fetch neighborhoods
       const neighborhoods=await fetchNeighborhoodsByLocation(lat,lng)
+      console.log(`[WarMaps] OSM returned ${neighborhoods.length} neighborhoods`)
 
-      // Save all new ones (up to 50 per sync)
-      const newOnes=neighborhoods.filter(n=>!existingOsmIds.has(n.osm_id)).slice(0,50)
-      console.log(`OSM found ${neighborhoods.length} neighborhoods, ${newOnes.length} new`)
-      for(const n of newOnes){
-        await addDoc(collection(db,'conquest_points'),{
+      // Save new ones
+      const newOnes=neighborhoods.filter(n=>!existingOsmIds.has(n.osm_id))
+      console.log(`[WarMaps] New to save: ${newOnes.length}`)
+
+      // Save in parallel batches of 10
+      for(let i=0;i<Math.min(newOnes.length,60);i+=10){
+        const batch=newOnes.slice(i,i+10)
+        await Promise.all(batch.map(n=>addDoc(collection(db,'conquest_points'),{
           ...n,
           source:'osm',
           owner_id:null,
           owner_km:0,
           created_at:serverTimestamp(),
-        })
+        })))
       }
-    }catch(e){console.warn('Sync error:',e)}
+      console.log(`[WarMaps] Sync complete`)
+    }catch(e){
+      console.error('[WarMaps] Sync error:',e)
+      // Remove from synced so it retries
+      syncedCities.current.delete(cityKey)
+    }
     setLoadingNeighborhoods(false)
   },[])
 
@@ -403,20 +415,23 @@ const ProfileView=({user,points,onUpdate})=>{
 
   return(
     <div style={{overflowY:'auto',height:'100%',background:'#f8fafc'}}>
-      {/* Banner */}
-      <div style={{height:110,background:`linear-gradient(135deg,${user.avatar_color||'#4f46e5'},${user.avatar_color||'#7c3aed'})`,position:'relative',overflow:'hidden',flexShrink:0}}>
-        <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:70,opacity:0.12}}>⚔️</div>
-      </div>
-      <div style={{padding:'0 20px 24px'}}>
-        {/* Avatar row — sits below banner */}
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:12,marginBottom:16}}>
-          <div style={{width:72,height:72,borderRadius:'50%',overflow:'hidden',border:'4px solid #f8fafc',boxShadow:'0 4px 12px rgba(0,0,0,0.15)',flexShrink:0,marginTop:-48,background:user.avatar_color||'#4f46e5'}}>
-            {form.photo_url?<img src={form.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:30,color:'#fff'}}>{user.display_name?.charAt(0)||'?'}</div>}
+      {/* Banner + Avatar */}
+      <div style={{position:'relative',marginBottom:50}}>
+        <div style={{height:100,background:`linear-gradient(135deg,${user.avatar_color||'#4f46e5'},${user.avatar_color||'#7c3aed'})`,overflow:'hidden'}}>
+          <div style={{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:70,opacity:0.12}}>⚔️</div>
+        </div>
+        <div style={{position:'absolute',bottom:-40,left:20}}>
+          <div style={{width:80,height:80,borderRadius:'50%',overflow:'hidden',border:'4px solid #f8fafc',boxShadow:'0 4px 16px rgba(0,0,0,0.2)',background:user.avatar_color||'#4f46e5'}}>
+            {form.photo_url?<img src={form.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:32,color:'#fff'}}>{user.display_name?.charAt(0)||'?'}</div>}
           </div>
+        </div>
+        <div style={{position:'absolute',bottom:-36,right:20}}>
           <button onClick={()=>setEditing(!editing)} style={{padding:'8px 16px',borderRadius:10,border:`1px solid ${editing?'#dc2626':'#e2e8f0'}`,background:editing?'#fef2f2':'#fff',color:editing?'#dc2626':'#64748b',cursor:'pointer',fontWeight:700,fontSize:12,display:'flex',alignItems:'center',gap:6}}>
             <I n={editing?'x':'edit'} s={14} c={editing?'#dc2626':'#64748b'}/>{editing?'Cancelar':'Editar'}
           </button>
         </div>
+      </div>
+      <div style={{padding:'0 20px 24px'}}>
 
         {editing?(
           <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:20,marginBottom:16}}>
@@ -858,7 +873,7 @@ export default function App(){
           {Object.keys(profiles).length===0&&<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:40}}>Nenhum jogador ainda.</div>}
         </div>}
 
-        {tab==='forum'&&<ForumView user={user} profiles={profiles}/>}
+        {tab==='forum'&&<div style={{height:'100%',display:'flex',flexDirection:'column'}}><ForumView user={user} profiles={profiles}/></div>}
         {tab==='profile'&&<ProfileView user={user} points={points} onUpdate={u=>{setUser(u);setProfiles(p=>({...p,[u.uid]:u}))}}/>}
 
         {toast&&<div style={{position:'absolute',bottom:20,left:'50%',transform:'translateX(-50%)',background:t.bg,border:`1px solid ${t.bo}`,borderRadius:12,padding:'12px 20px',zIndex:2000,fontSize:13,fontWeight:600,color:t.tx,boxShadow:'0 8px 32px rgba(0,0,0,0.12)',whiteSpace:'nowrap',animation:'su 0.3s ease'}}>{toast.msg}</div>}
