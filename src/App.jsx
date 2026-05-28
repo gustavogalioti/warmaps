@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   auth, db,
   createUserWithEmailAndPassword,
@@ -7,6 +7,7 @@ import {
   collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
   onSnapshot, query, where, orderBy, serverTimestamp,
 } from './firebase.js'
+import { fetchNeighborhoodsByLocation, detectCityByGPS } from './neighborhoods.js'
 
 // ── helpers ───────────────────────────────────────────────────
 const hav=(a,b,c,d)=>{const R=6371000,x=(c-a)*Math.PI/180,y=(d-b)*Math.PI/180,s=Math.sin(x/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(y/2)**2;return R*2*Math.atan2(Math.sqrt(s),Math.sqrt(1-s))}
@@ -18,6 +19,21 @@ const rndColor=()=>COLORS[Math.floor(Math.random()*COLORS.length)]
 const TC={QUARTEIRAO:'#4f46e5',BAIRRO:'#d97706',AREA:'#059669',CIDADE:'#dc2626'}
 const TB={QUARTEIRAO:'#eef2ff',BAIRRO:'#fffbeb',AREA:'#ecfdf5',CIDADE:'#fef2f2'}
 const TL={QUARTEIRAO:'QUARTEIRÃO',BAIRRO:'BAIRRO',AREA:'ÁREA',CIDADE:'CIDADE'}
+
+// ── Imgur upload ──────────────────────────────────────────────
+const IMGUR_CLIENT_ID = '546c25a59c58ad7' // public anonymous key
+async function uploadToImgur(file) {
+  const form = new FormData()
+  form.append('image', file)
+  const res = await fetch('https://api.imgur.com/3/image', {
+    method: 'POST',
+    headers: { Authorization: `Client-ID ${IMGUR_CLIENT_ID}` },
+    body: form,
+  })
+  const data = await res.json()
+  if (!data.success) throw new Error('Falha no upload')
+  return data.data.link
+}
 
 // ── icons ─────────────────────────────────────────────────────
 const I=({n,s=18,c='currentColor'})=>{
@@ -43,12 +59,13 @@ const I=({n,s=18,c='currentColor'})=>{
     msg:<><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></>,
     send:<><line x1="22"y1="2"x2="11"y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></>,
     zap:<><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></>,
-    map:<><circle cx="12"cy="12"r="10"/><line x1="2"y1="12"x2="22"y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></>,
+    refresh:<><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></>,
+    locate:<><circle cx="12"cy="12"r="3"/><path d="M22 12h-4M6 12H2M12 6V2M12 22v-4"/></>,
   }
   return <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{d[n]}</svg>
 }
 
-// ── GPS ───────────────────────────────────────────────────────
+// ── GPS hook ──────────────────────────────────────────────────
 const useGeo=()=>{
   const[g,setG]=useState({lat:null,lng:null,acc:null,err:null,loading:true})
   useEffect(()=>{
@@ -63,93 +80,167 @@ const useGeo=()=>{
   return g
 }
 
+// ── Neighborhood sync ─────────────────────────────────────────
+const useNeighborhoodSync=(geo,user,points,setLoadingNeighborhoods)=>{
+  const syncedCities=useRef(new Set())
+
+  const syncCity=useCallback(async(lat,lng)=>{
+    const cityKey=`${Math.round(lat*10)/10}_${Math.round(lng*10)/10}`
+    if(syncedCities.current.has(cityKey))return
+    syncedCities.current.add(cityKey)
+    setLoadingNeighborhoods(true)
+    try{
+      // Get existing OSM point IDs from Firestore
+      const existingSnap=await getDocs(query(collection(db,'conquest_points'),where('source','==','osm')))
+      const existingOsmIds=new Set(existingSnap.docs.map(d=>d.data().osm_id).filter(Boolean))
+
+      // Fetch neighborhoods from OSM
+      const neighborhoods=await fetchNeighborhoodsByLocation(lat,lng)
+
+      // Save only new ones
+      let added=0
+      for(const n of neighborhoods){
+        if(existingOsmIds.has(n.osm_id))continue
+        await addDoc(collection(db,'conquest_points'),{
+          ...n,
+          source:'osm',
+          owner_id:null,
+          owner_km:0,
+          created_at:serverTimestamp(),
+        })
+        added++
+        if(added>=5)break // batch of 5 per call to avoid rate limits
+      }
+    }catch(e){console.warn('Sync error:',e)}
+    setLoadingNeighborhoods(false)
+  },[])
+
+  useEffect(()=>{
+    if(!geo.lat||!user)return
+    syncCity(geo.lat,geo.lng)
+  },[geo.lat,geo.lng,user])
+
+  // Also sync user's profile city
+  useEffect(()=>{
+    if(!user?.city_lat||!user?.city_lng)return
+    syncCity(user.city_lat,user.city_lng)
+  },[user?.city_lat,user?.city_lng])
+}
+
 // ── Leaflet Map ───────────────────────────────────────────────
 const LeafletMap=({points,geo,profiles,selectedId,battles,addMode,onSelect,onMapClick})=>{
-  const ref=useRef(null),mapRef=useRef(null),layersRef=useRef({}),userRef=useRef(null)
+  const ref=useRef(null),mapRef=useRef(null),layersRef=useRef({}),userRef=useRef(null),centeredRef=useRef(false)
+
   useEffect(()=>{
     if(mapRef.current||!window.L)return
-    const map=window.L.map(ref.current,{zoomControl:false,attributionControl:false})
-      .setView([geo.lat||-23.575,geo.lng||-46.650],15)
-    window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map)
+    const map=window.L.map(ref.current,{zoomControl:false,attributionControl:false}).setView([-23.575,-46.650],13)
+    window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map)
     window.L.control.zoom({position:'bottomright'}).addTo(map)
     map.on('click',e=>{if(window.__wmAdd)onMapClick({lat:e.latlng.lat,lng:e.latlng.lng})})
     mapRef.current=map
   },[])
+
   useEffect(()=>{window.__wmAdd=addMode},[addMode])
+
+  // User dot + center once
   useEffect(()=>{
     const L=window.L,map=mapRef.current
     if(!L||!map||!geo.lat)return
     if(userRef.current)userRef.current.setLatLng([geo.lat,geo.lng])
-    else{userRef.current=L.circleMarker([geo.lat,geo.lng],{radius:10,fillColor:'#4f46e5',fillOpacity:1,color:'#fff',weight:3}).addTo(map);map.setView([geo.lat,geo.lng],15)}
+    else{
+      userRef.current=L.circleMarker([geo.lat,geo.lng],{radius:10,fillColor:'#4f46e5',fillOpacity:1,color:'#fff',weight:3,zIndexOffset:1000}).addTo(map)
+    }
+    if(!centeredRef.current){map.setView([geo.lat,geo.lng],14);centeredRef.current=true}
   },[geo.lat,geo.lng])
+
+  // Draw conquest circles
   useEffect(()=>{
     const L=window.L,map=mapRef.current
     if(!L||!map)return
     Object.values(layersRef.current).forEach(l=>l.remove())
     layersRef.current={}
     points.forEach(pt=>{
-      const p=profiles[pt.owner_id],color=p?.avatar_color||pt.owner_color||(pt.owner_id?'#4f46e5':'#94a3b8')
-      const inBattle=battles.some(b=>b.conquest_point_id===pt.id),isSel=selectedId===pt.id
-      const g=window.L.layerGroup().addTo(map)
-      L.circle([pt.lat,pt.lng],{radius:pt.radius_m,fillColor:pt.owner_id?color:'#94a3b8',fillOpacity:pt.owner_id?0.18:0.07,color:inBattle?'#dc2626':isSel?'#1d4ed8':(pt.owner_id?color:'#94a3b8'),weight:isSel?3:inBattle?2.5:1.5,dashArray:inBattle?'6 4':null}).on('click',()=>onSelect(pt)).addTo(g)
+      const p=profiles[pt.owner_id]
+      const color=p?.avatar_color||pt.owner_color||(pt.owner_id?'#4f46e5':'#94a3b8')
+      const inBattle=battles.some(b=>b.conquest_point_id===pt.id)
+      const isSel=selectedId===pt.id
+      const g=L.layerGroup().addTo(map)
+      L.circle([pt.lat,pt.lng],{
+        radius:pt.radius_m,
+        fillColor:pt.owner_id?color:'#94a3b8',
+        fillOpacity:pt.owner_id?0.2:0.06,
+        color:inBattle?'#dc2626':isSel?'#1d4ed8':(pt.owner_id?color:'#cbd5e1'),
+        weight:isSel?3:inBattle?2.5:1,
+        dashArray:inBattle?'6 4':null,
+      }).on('click',()=>onSelect(pt)).addTo(g)
       const ownerInitial=p?.display_name?.charAt(0)||pt.owner_name?.charAt(0)||''
-      L.marker([pt.lat,pt.lng],{icon:L.divIcon({className:'',html:`<div style="background:${pt.owner_id?color:'#94a3b8'};color:#fff;padding:3px 9px;border-radius:20px;font-size:11px;font-weight:700;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,0.2);font-family:monospace">${inBattle?'⚔ ':''}${pt.name}${ownerInitial?' · '+ownerInitial:' 🏳'}</div>`,iconAnchor:[0,0]})}).on('click',()=>onSelect(pt)).addTo(g)
+      const labelColor=pt.owner_id?color:'#94a3b8'
+      L.marker([pt.lat,pt.lng],{icon:L.divIcon({
+        className:'',
+        html:`<div style="background:${labelColor};color:#fff;padding:2px 8px;border-radius:16px;font-size:11px;font-weight:700;white-space:nowrap;box-shadow:0 1px 6px rgba(0,0,0,0.18);font-family:monospace;opacity:${pt.owner_id?1:0.7}">${inBattle?'⚔ ':''}${pt.name}${ownerInitial?' · '+ownerInitial:''}</div>`,
+        iconAnchor:[0,0],
+      })}).on('click',()=>onSelect(pt)).addTo(g)
       layersRef.current[pt.id]=g
     })
   },[points,profiles,selectedId,battles])
+
   return(
     <div style={{position:'relative',width:'100%',height:'100%'}}>
       <div ref={ref} style={{width:'100%',height:'100%'}}/>
-      {addMode&&<div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-120%)',background:'#4f46e5',color:'#fff',padding:'10px 18px',borderRadius:12,fontSize:13,fontWeight:700,pointerEvents:'none',boxShadow:'0 4px 20px rgba(79,70,229,0.4)',zIndex:1000}}>📍 Toque no mapa para posicionar</div>}
+      {addMode&&<div style={{position:'absolute',top:'40%',left:'50%',transform:'translateX(-50%)',background:'#4f46e5',color:'#fff',padding:'10px 18px',borderRadius:12,fontSize:13,fontWeight:700,pointerEvents:'none',boxShadow:'0 4px 20px rgba(79,70,229,0.4)',zIndex:1000}}>📍 Toque no mapa para posicionar</div>}
     </div>
   )
 }
 
-// ── Point Form (Add/Edit) ─────────────────────────────────────
-const PointForm=({lat,lng,initial,onSave,onCancel,onDelete})=>{
-  const[name,setName]=useState(initial?.name||'')
-  const[type,setType]=useState(initial?.type||'BAIRRO')
-  const[radius,setRadius]=useState(String(initial?.radius_m||300))
-  const[confirmDel,setConfirmDel]=useState(false)
-  const s={width:'100%',padding:'11px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:13,outline:'none',marginBottom:10}
-  const isEdit=!!initial
+// ── Neighborhood loading indicator ────────────────────────────
+const NeighborhoodLoader=({loading,count})=>{
+  if(!loading&&count>0)return null
+  if(loading)return(
+    <div style={{position:'absolute',top:16,left:'50%',transform:'translateX(-50%)',background:'#fff',border:'1px solid #e2e8f0',borderRadius:20,padding:'7px 16px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:600,color:'#4f46e5',zIndex:1000,boxShadow:'0 2px 12px rgba(0,0,0,0.1)',whiteSpace:'nowrap'}}>
+      <I n="refresh" s={13} c="#4f46e5"/> Carregando bairros...
+    </div>
+  )
+  if(count===0)return(
+    <div style={{position:'absolute',top:16,left:'50%',transform:'translateX(-50%)',background:'#fffbeb',border:'1px solid #fcd34d',borderRadius:20,padding:'7px 16px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:600,color:'#d97706',zIndex:1000,boxShadow:'0 2px 12px rgba(0,0,0,0.1)',whiteSpace:'nowrap'}}>
+      <I n="warn" s={13} c="#d97706"/> Nenhum bairro encontrado nesta área
+    </div>
+  )
+  return null
+}
+
+// ── Photo Upload ──────────────────────────────────────────────
+const PhotoUpload=({currentUrl,onUploaded})=>{
+  const[uploading,setUploading]=useState(false)
+  const[err,setErr]=useState('')
+  const fileRef=useRef(null)
+
+  const handle=async(e)=>{
+    const file=e.target.files?.[0]
+    if(!file)return
+    if(file.size>5*1024*1024){setErr('Foto muito grande (máx 5MB)');return}
+    setUploading(true);setErr('')
+    try{
+      const url=await uploadToImgur(file)
+      onUploaded(url)
+    }catch(e){setErr('Falha no upload. Tente novamente.')}
+    setUploading(false)
+  }
+
   return(
-    <div style={{background:'#fff',borderRadius:20,padding:28,width:320,boxShadow:'0 20px 60px rgba(0,0,0,0.15)',maxHeight:'90vh',overflowY:'auto'}}>
-      <div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:4}}>{isEdit?'EDITAR PONTO':'NOVO PONTO'}</div>
-      <div style={{fontSize:18,fontWeight:900,color:'#0f172a',marginBottom:16}}>{isEdit?name:'Adicionar Conquista'}</div>
-      {!isEdit&&<div style={{fontSize:11,color:'#94a3b8',marginBottom:14,background:'#f8fafc',padding:'8px 12px',borderRadius:8}}>📍 {lat?.toFixed(5)}, {lng?.toFixed(5)}</div>}
-      <input style={s} placeholder="Nome do ponto (ex: Vila Mariana)" value={name} onChange={e=>setName(e.target.value)}/>
-      <select style={{...s,cursor:'pointer'}} value={type} onChange={e=>setType(e.target.value)}>
-        {[['QUARTEIRAO','QUARTEIRÃO'],['BAIRRO','BAIRRO'],['AREA','ÁREA'],['CIDADE','CIDADE']].map(([v,l])=><option key={v} value={v}>{l}</option>)}
-      </select>
-      <div style={{marginBottom:16}}>
-        <div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:'#64748b',marginBottom:8}}>
-          <span>Raio de conquista</span><span style={{color:'#4f46e5',fontWeight:700}}>{fmtD(parseInt(radius)||0)}</span>
+    <div style={{marginBottom:16}}>
+      <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:8}}>Foto de perfil</label>
+      <div style={{display:'flex',alignItems:'center',gap:12}}>
+        <div style={{width:60,height:60,borderRadius:'50%',overflow:'hidden',border:'2px solid #e2e8f0',flexShrink:0,background:'#f1f5f9',display:'flex',alignItems:'center',justifyContent:'center'}}>
+          {currentUrl?<img src={currentUrl} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<I n="user" s={24} c="#94a3b8"/>}
         </div>
-        <input type="range" min="50" max="3000" step="50" value={radius} onChange={e=>setRadius(e.target.value)} style={{width:'100%',accentColor:'#4f46e5'}}/>
-        <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:'#94a3b8',marginTop:4}}><span>50m</span><span>3km</span></div>
-      </div>
-      <div style={{display:'flex',gap:10,marginBottom:isEdit?10:0}}>
-        <button onClick={onCancel} style={{flex:1,padding:'11px',borderRadius:10,background:'#f1f5f9',border:'none',color:'#64748b',cursor:'pointer',fontWeight:700}}>Cancelar</button>
-        <button onClick={()=>name.trim()&&onSave({name,type,radius})} disabled={!name.trim()} style={{flex:2,padding:'11px',borderRadius:10,background:name.trim()?'#4f46e5':'#c7d2fe',border:'none',color:'#fff',cursor:name.trim()?'pointer':'not-allowed',fontWeight:900}}>
-          {isEdit?'Salvar alterações':'Salvar ponto'}
-        </button>
-      </div>
-      {isEdit&&(
-        confirmDel?(
-          <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:12,marginTop:4}}>
-            <div style={{fontSize:13,color:'#dc2626',fontWeight:700,marginBottom:8}}>Confirmar exclusão?</div>
-            <div style={{display:'flex',gap:8}}>
-              <button onClick={()=>setConfirmDel(false)} style={{flex:1,padding:'9px',borderRadius:8,background:'#f1f5f9',border:'none',cursor:'pointer',fontWeight:700,color:'#64748b'}}>Não</button>
-              <button onClick={onDelete} style={{flex:1,padding:'9px',borderRadius:8,background:'#dc2626',border:'none',cursor:'pointer',fontWeight:900,color:'#fff'}}>Sim, apagar</button>
-            </div>
-          </div>
-        ):(
-          <button onClick={()=>setConfirmDel(true)} style={{width:'100%',marginTop:4,padding:'10px',borderRadius:10,background:'transparent',border:'1px solid #fecaca',color:'#dc2626',cursor:'pointer',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
-            <I n="trash" s={14} c="#dc2626"/> Apagar ponto
+        <div style={{flex:1}}>
+          <input ref={fileRef} type="file" accept="image/*" onChange={handle} style={{display:'none'}}/>
+          <button onClick={()=>fileRef.current?.click()} disabled={uploading} style={{width:'100%',padding:'9px',borderRadius:10,border:'1px dashed #c7d2fe',background:'#f8fafc',color:'#4f46e5',cursor:uploading?'wait':'pointer',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+            {uploading?<><I n="refresh" s={14} c="#4f46e5"/> Enviando...</>:<><I n="camera" s={14} c="#4f46e5"/> {currentUrl?'Trocar foto':'Enviar foto'}</>}
           </button>
-        )
-      )}
+          {err&&<div style={{fontSize:11,color:'#dc2626',marginTop:4}}>{err}</div>}
+        </div>
+      </div>
     </div>
   )
 }
@@ -210,17 +301,18 @@ const Panel=({point,geo,user,battles,profiles,onBattle,onCheckin,onClose,onEdit}
           <div style={{flex:1}}>
             <span style={{fontSize:10,fontWeight:700,color:TC[point.type]||'#64748b',background:TB[point.type]||'#f8fafc',padding:'3px 8px',borderRadius:20}}>{TL[point.type]||point.type}</span>
             <div style={{fontSize:20,fontWeight:900,color:'#0f172a',marginTop:8}}>{point.name}</div>
+            {point.city&&<div style={{fontSize:11,color:'#94a3b8',marginTop:2}}>{point.city}</div>}
           </div>
-          <div style={{display:'flex',gap:6,alignItems:'center'}}>
-            {user?.is_admin&&<button onClick={()=>onEdit(point)} style={{background:'#f1f5f9',border:'none',borderRadius:8,padding:8,cursor:'pointer'}}><I n="edit" s={15} c="#4f46e5"/></button>}
+          <div style={{display:'flex',gap:6}}>
+            {user?.is_admin&&<button onClick={()=>onEdit(point)} style={{background:'#eef2ff',border:'none',borderRadius:8,padding:8,cursor:'pointer'}}><I n="edit" s={15} c="#4f46e5"/></button>}
             <button onClick={onClose} style={{background:'#f1f5f9',border:'none',borderRadius:8,padding:8,cursor:'pointer'}}><I n="x" s={15} c="#64748b"/></button>
           </div>
         </div>
         <div style={{marginTop:12,display:'flex',alignItems:'center',gap:10}}>
           {point.owner_id?<>
-            {p?.photo_url?<img src={p.photo_url} style={{width:40,height:40,borderRadius:'50%',objectFit:'cover'}} alt=""/>:<div style={{width:40,height:40,borderRadius:'50%',background:color,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:18,color:'#fff',flexShrink:0}}>{ownerName.charAt(0)}</div>}
+            {p?.photo_url?<img src={p.photo_url} style={{width:40,height:40,borderRadius:'50%',objectFit:'cover',flexShrink:0}} alt=""/>:<div style={{width:40,height:40,borderRadius:'50%',background:color,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:18,color:'#fff',flexShrink:0}}>{ownerName.charAt(0)}</div>}
             <div><div style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{ownerName}</div><div style={{fontSize:11,color:'#64748b'}}>{point.owner_km?.toFixed(0)||0} km acumulados</div></div>
-          </>:<div style={{display:'flex',alignItems:'center',gap:8,color:'#64748b',background:'#f8fafc',borderRadius:10,padding:'10px 14px',width:'100%'}}><I n="flag" s={18}/><span style={{fontSize:13,fontWeight:600}}>Território livre!</span></div>}
+          </>:<div style={{display:'flex',alignItems:'center',gap:8,color:'#64748b',background:'#f8fafc',borderRadius:10,padding:'10px 14px',width:'100%'}}><I n="flag" s={18}/><span style={{fontSize:13,fontWeight:600}}>Território livre — conquiste!</span></div>}
         </div>
       </div>
       {battle&&<div style={{margin:'12px 18px 0',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:12}}>
@@ -250,6 +342,51 @@ const Panel=({point,geo,user,battles,profiles,onBattle,onCheckin,onClose,onEdit}
   )
 }
 
+// ── Point Form (Add/Edit ADM) ─────────────────────────────────
+const PointForm=({lat,lng,initial,onSave,onCancel,onDelete})=>{
+  const[name,setName]=useState(initial?.name||'')
+  const[type,setType]=useState(initial?.type||'BAIRRO')
+  const[radius,setRadius]=useState(String(initial?.radius_m||300))
+  const[confirmDel,setConfirmDel]=useState(false)
+  const s={width:'100%',padding:'11px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:13,outline:'none',marginBottom:10}
+  const isEdit=!!initial
+  return(
+    <div style={{background:'#fff',borderRadius:20,padding:28,width:320,boxShadow:'0 20px 60px rgba(0,0,0,0.15)',maxHeight:'90vh',overflowY:'auto'}}>
+      <div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:4}}>{isEdit?'EDITAR PONTO':'NOVO PONTO'}</div>
+      <div style={{fontSize:18,fontWeight:900,color:'#0f172a',marginBottom:16}}>{isEdit?name:'Adicionar Conquista'}</div>
+      {!isEdit&&<div style={{fontSize:11,color:'#94a3b8',marginBottom:14,background:'#f8fafc',padding:'8px 12px',borderRadius:8}}>📍 {lat?.toFixed(5)}, {lng?.toFixed(5)}</div>}
+      <input style={s} placeholder="Nome do ponto" value={name} onChange={e=>setName(e.target.value)}/>
+      <select style={{...s,cursor:'pointer'}} value={type} onChange={e=>setType(e.target.value)}>
+        {[['QUARTEIRAO','QUARTEIRÃO'],['BAIRRO','BAIRRO'],['AREA','ÁREA'],['CIDADE','CIDADE']].map(([v,l])=><option key={v} value={v}>{l}</option>)}
+      </select>
+      <div style={{marginBottom:16}}>
+        <div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:'#64748b',marginBottom:8}}>
+          <span>Raio</span><span style={{color:'#4f46e5',fontWeight:700}}>{fmtD(parseInt(radius)||0)}</span>
+        </div>
+        <input type="range" min="50" max="3000" step="50" value={radius} onChange={e=>setRadius(e.target.value)} style={{width:'100%',accentColor:'#4f46e5'}}/>
+      </div>
+      <div style={{display:'flex',gap:10,marginBottom:isEdit?10:0}}>
+        <button onClick={onCancel} style={{flex:1,padding:'11px',borderRadius:10,background:'#f1f5f9',border:'none',color:'#64748b',cursor:'pointer',fontWeight:700}}>Cancelar</button>
+        <button onClick={()=>name.trim()&&onSave({name,type,radius})} disabled={!name.trim()} style={{flex:2,padding:'11px',borderRadius:10,background:name.trim()?'#4f46e5':'#c7d2fe',border:'none',color:'#fff',cursor:name.trim()?'pointer':'not-allowed',fontWeight:900}}>
+          {isEdit?'Salvar':'Criar ponto'}
+        </button>
+      </div>
+      {isEdit&&(confirmDel?
+        <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:12,marginTop:4}}>
+          <div style={{fontSize:13,color:'#dc2626',fontWeight:700,marginBottom:8}}>Confirmar exclusão?</div>
+          <div style={{display:'flex',gap:8}}>
+            <button onClick={()=>setConfirmDel(false)} style={{flex:1,padding:'9px',borderRadius:8,background:'#f1f5f9',border:'none',cursor:'pointer',fontWeight:700,color:'#64748b'}}>Não</button>
+            <button onClick={onDelete} style={{flex:1,padding:'9px',borderRadius:8,background:'#dc2626',border:'none',cursor:'pointer',fontWeight:900,color:'#fff'}}>Apagar</button>
+          </div>
+        </div>:
+        <button onClick={()=>setConfirmDel(true)} style={{width:'100%',marginTop:4,padding:'10px',borderRadius:10,background:'transparent',border:'1px solid #fecaca',color:'#dc2626',cursor:'pointer',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
+          <I n="trash" s={14} c="#dc2626"/> Apagar ponto
+        </button>
+      )}
+    </div>
+  )
+}
+
 // ── Profile View ──────────────────────────────────────────────
 const ProfileView=({user,points,onUpdate})=>{
   const[editing,setEditing]=useState(false)
@@ -268,35 +405,27 @@ const ProfileView=({user,points,onUpdate})=>{
 
   return(
     <div style={{overflowY:'auto',height:'100%',background:'#f8fafc'}}>
-      {/* Banner */}
       <div style={{height:120,background:`linear-gradient(135deg,${user.avatar_color||'#4f46e5'},${user.avatar_color||'#7c3aed'})`,position:'relative',flexShrink:0}}>
         <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:70,opacity:0.12}}>⚔️</div>
       </div>
-
       <div style={{padding:'0 20px 24px'}}>
-        {/* Avatar + edit */}
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginTop:-36,marginBottom:16}}>
-          <div style={{position:'relative'}}>
-            {form.photo_url?
-              <img src={form.photo_url} style={{width:72,height:72,borderRadius:'50%',objectFit:'cover',border:'4px solid #f8fafc',boxShadow:'0 4px 12px rgba(0,0,0,0.15)'}} alt=""/>:
-              <div style={{width:72,height:72,borderRadius:'50%',background:user.avatar_color||'#4f46e5',border:'4px solid #f8fafc',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:30,color:'#fff',boxShadow:'0 4px 12px rgba(0,0,0,0.15)'}}>{user.display_name?.charAt(0)||'?'}</div>
-            }
+          <div style={{width:72,height:72,borderRadius:'50%',overflow:'hidden',border:'4px solid #f8fafc',boxShadow:'0 4px 12px rgba(0,0,0,0.15)',flexShrink:0}}>
+            {form.photo_url?<img src={form.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',background:user.avatar_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:30,color:'#fff'}}>{user.display_name?.charAt(0)||'?'}</div>}
           </div>
           <button onClick={()=>setEditing(!editing)} style={{padding:'8px 16px',borderRadius:10,border:`1px solid ${editing?'#dc2626':'#e2e8f0'}`,background:editing?'#fef2f2':'#fff',color:editing?'#dc2626':'#64748b',cursor:'pointer',fontWeight:700,fontSize:12,display:'flex',alignItems:'center',gap:6}}>
-            <I n={editing?'x':'edit'} s={14} c={editing?'#dc2626':'#64748b'}/>{editing?'Cancelar':'Editar perfil'}
+            <I n={editing?'x':'edit'} s={14} c={editing?'#dc2626':'#64748b'}/>{editing?'Cancelar':'Editar'}
           </button>
         </div>
 
         {editing?(
           <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:20,marginBottom:16}}>
-            <div style={{fontSize:12,fontWeight:700,color:'#4f46e5',marginBottom:16,letterSpacing:1}}>EDITAR PERFIL</div>
+            <PhotoUpload currentUrl={form.photo_url} onUploaded={url=>setForm(f=>({...f,photo_url:url}))}/>
             <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:4}}>Nome</label>
             <input style={inp} value={form.display_name} onChange={e=>setForm(f=>({...f,display_name:e.target.value}))} placeholder="Seu nome"/>
-            <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:4}}>URL da foto de perfil</label>
-            <input style={inp} value={form.photo_url} onChange={e=>setForm(f=>({...f,photo_url:e.target.value}))} placeholder="https://..."/>
             <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:4}}>Bio</label>
-            <textarea style={{...inp,resize:'none',height:80,fontFamily:'inherit'}} value={form.bio} onChange={e=>setForm(f=>({...f,bio:e.target.value}))} placeholder="Conte algo sobre você..."/>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
+            <textarea style={{...inp,resize:'none',height:72,fontFamily:'inherit'}} value={form.bio} onChange={e=>setForm(f=>({...f,bio:e.target.value}))} placeholder="Fale sobre você..."/>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:10}}>
               <div>
                 <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:4}}>Idade</label>
                 <input style={{...inp,marginBottom:0}} type="number" value={form.age} onChange={e=>setForm(f=>({...f,age:e.target.value}))} placeholder="25"/>
@@ -306,54 +435,49 @@ const ProfileView=({user,points,onUpdate})=>{
                 <input style={{...inp,marginBottom:0}} value={form.city} onChange={e=>setForm(f=>({...f,city:e.target.value}))} placeholder="São Paulo"/>
               </div>
             </div>
-            <button onClick={save} disabled={saving} style={{width:'100%',marginTop:16,padding:'12px',borderRadius:12,border:'none',background:saving?'#c7d2fe':'#4f46e5',color:'#fff',fontWeight:900,cursor:saving?'wait':'pointer',fontSize:13}}>
+            <button onClick={save} disabled={saving} style={{width:'100%',marginTop:6,padding:'12px',borderRadius:12,border:'none',background:saving?'#c7d2fe':'#4f46e5',color:'#fff',fontWeight:900,cursor:saving?'wait':'pointer',fontSize:13}}>
               {saving?'Salvando...':'Salvar perfil'}
             </button>
           </div>
         ):(
-          <>
-            <div style={{marginBottom:4}}>
-              <div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>{user.display_name}</div>
-              {user.username&&<div style={{fontSize:13,color:'#94a3b8'}}>{user.username}</div>}
-              {(user.age||user.city)&&<div style={{fontSize:13,color:'#64748b',marginTop:4}}>{user.age?`${user.age} anos`:''}{user.age&&user.city?' · ':''}{user.city||''}</div>}
-              {user.bio&&<div style={{fontSize:13,color:'#475569',marginTop:8,lineHeight:1.6}}>{user.bio}</div>}
-              {user.is_admin&&<span style={{fontSize:10,fontWeight:700,color:'#4f46e5',background:'#eef2ff',padding:'3px 10px',borderRadius:20,marginTop:8,display:'inline-block'}}>ADM</span>}
-            </div>
-          </>
+          <div style={{marginBottom:16}}>
+            <div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>{user.display_name}</div>
+            {user.username&&<div style={{fontSize:13,color:'#94a3b8'}}>{user.username}</div>}
+            {(user.age||user.city)&&<div style={{fontSize:13,color:'#64748b',marginTop:4}}>{user.age?`${user.age} anos`:''}{user.age&&user.city?' · ':''}{user.city||''}</div>}
+            {user.bio&&<div style={{fontSize:13,color:'#475569',marginTop:8,lineHeight:1.6}}>{user.bio}</div>}
+            {user.is_admin&&<span style={{fontSize:10,fontWeight:700,color:'#4f46e5',background:'#eef2ff',padding:'3px 10px',borderRadius:20,marginTop:8,display:'inline-block'}}>ADM</span>}
+          </div>
         )}
 
-        {/* Stats */}
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:20,marginTop:16}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:20}}>
           {[['🏃',`${user.km_total||0}km`,'KMs'],['⚑',myPoints.length,'Territórios'],['⭐',user.points||0,'Pontos']].map(([ic,v,l])=>(
-            <div key={l} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:'16px 10px',textAlign:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
-              <div style={{fontSize:22,marginBottom:4}}>{ic}</div>
-              <div style={{fontSize:20,fontWeight:900,color:'#4f46e5'}}>{v}</div>
+            <div key={l} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:'14px 10px',textAlign:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
+              <div style={{fontSize:20,marginBottom:4}}>{ic}</div>
+              <div style={{fontSize:18,fontWeight:900,color:'#4f46e5'}}>{v}</div>
               <div style={{fontSize:10,color:'#94a3b8',fontWeight:600}}>{l}</div>
             </div>
           ))}
         </div>
 
-        {/* My territories */}
-        {myPoints.length>0&&(
-          <div>
-            <div style={{fontSize:12,fontWeight:700,color:'#64748b',letterSpacing:1,marginBottom:12}}>TERRITÓRIOS DOMINADOS</div>
-            {myPoints.map(p=>(
-              <div key={p.id} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:12,padding:'12px 16px',marginBottom:8,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                <div>
-                  <span style={{fontSize:10,fontWeight:700,color:TC[p.type]||'#64748b',background:TB[p.type]||'#f8fafc',padding:'2px 8px',borderRadius:20}}>{TL[p.type]||p.type}</span>
-                  <div style={{fontSize:14,fontWeight:700,color:'#0f172a',marginTop:4}}>{p.name}</div>
-                </div>
-                <div style={{fontSize:12,color:'#4f46e5',fontWeight:700}}>{p.base_points} pts</div>
+        {myPoints.length>0&&<>
+          <div style={{fontSize:12,fontWeight:700,color:'#64748b',letterSpacing:1,marginBottom:12}}>TERRITÓRIOS DOMINADOS</div>
+          {myPoints.map(p=>(
+            <div key={p.id} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:12,padding:'12px 16px',marginBottom:8,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <div>
+                <span style={{fontSize:10,fontWeight:700,color:TC[p.type]||'#64748b',background:TB[p.type]||'#f8fafc',padding:'2px 8px',borderRadius:20}}>{TL[p.type]||p.type}</span>
+                <div style={{fontSize:14,fontWeight:700,color:'#0f172a',marginTop:4}}>{p.name}</div>
+                {p.city&&<div style={{fontSize:11,color:'#94a3b8'}}>{p.city}</div>}
               </div>
-            ))}
-          </div>
-        )}
+              <div style={{fontSize:12,color:'#4f46e5',fontWeight:700}}>{p.base_points} pts</div>
+            </div>
+          ))}
+        </>}
       </div>
     </div>
   )
 }
 
-// ── Forum View ────────────────────────────────────────────────
+// ── Forum ─────────────────────────────────────────────────────
 const ForumView=({user,profiles})=>{
   const[posts,setPosts]=useState([])
   const[openPost,setOpenPost]=useState(null)
@@ -364,19 +488,10 @@ const ForumView=({user,profiles})=>{
   const[showNew,setShowNew]=useState(false)
   const[posting,setPosting]=useState(false)
 
-  useEffect(()=>{
-    const unsub=onSnapshot(query(collection(db,'forum_posts'),orderBy('created_at','desc')),s=>{
-      setPosts(s.docs.map(d=>({id:d.id,...d.data()})))
-    })
-    return unsub
-  },[])
-
+  useEffect(()=>onSnapshot(query(collection(db,'forum_posts'),orderBy('created_at','desc')),s=>setPosts(s.docs.map(d=>({id:d.id,...d.data()})))),[])
   useEffect(()=>{
     if(!openPost)return
-    const unsub=onSnapshot(query(collection(db,'forum_posts',openPost.id,'comments'),orderBy('created_at','asc')),s=>{
-      setComments(s.docs.map(d=>({id:d.id,...d.data()})))
-    })
-    return unsub
+    return onSnapshot(query(collection(db,'forum_posts',openPost.id,'comments'),orderBy('created_at','asc')),s=>setComments(s.docs.map(d=>({id:d.id,...d.data()}))))
   },[openPost?.id])
 
   const submitPost=async()=>{
@@ -387,52 +502,54 @@ const ForumView=({user,profiles})=>{
   }
 
   const submitComment=async()=>{
-    if(!newComment.trim())return
+    if(!newComment.trim()||!openPost)return
     await addDoc(collection(db,'forum_posts',openPost.id,'comments'),{body:newComment,author_id:user.uid,author_name:user.display_name,author_color:user.avatar_color,author_photo:user.photo_url||null,created_at:serverTimestamp()})
     setNewComment('')
   }
 
-  const toggleLike=async(post)=>{
-    const likes=post.likes||[]
-    const has=likes.includes(user.uid)
+  const toggleLike=async(post,e)=>{
+    e.stopPropagation()
+    const likes=post.likes||[],has=likes.includes(user.uid)
     await updateDoc(doc(db,'forum_posts',post.id),{likes:has?likes.filter(x=>x!==user.uid):[...likes,user.uid]})
   }
 
+  const Avatar=({photo,color,name,size=36})=>photo?
+    <img src={photo} style={{width:size,height:size,borderRadius:'50%',objectFit:'cover',flexShrink:0}} alt=""/>:
+    <div style={{width:size,height:size,borderRadius:'50%',background:color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,color:'#fff',fontSize:size*0.45,flexShrink:0}}>{name?.charAt(0)||'?'}</div>
+
   const inp={width:'100%',padding:'10px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:13,outline:'none'}
 
-  if(openPost) return(
+  if(openPost)return(
     <div style={{display:'flex',flexDirection:'column',height:'100%',background:'#f8fafc'}}>
-      <div style={{padding:'16px 20px',background:'#fff',borderBottom:'1px solid #e2e8f0',display:'flex',alignItems:'center',gap:12}}>
+      <div style={{padding:'14px 20px',background:'#fff',borderBottom:'1px solid #e2e8f0',display:'flex',alignItems:'center',gap:12,flexShrink:0}}>
         <button onClick={()=>setOpenPost(null)} style={{background:'#f1f5f9',border:'none',borderRadius:8,padding:'6px 12px',cursor:'pointer',fontWeight:700,color:'#64748b',fontSize:13}}>← Voltar</button>
-        <div style={{fontSize:15,fontWeight:900,color:'#0f172a',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{openPost.title}</div>
+        <div style={{fontSize:14,fontWeight:900,color:'#0f172a',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{openPost.title}</div>
       </div>
       <div style={{flex:1,overflowY:'auto',padding:'16px 20px'}}>
-        {/* Original post */}
         <div style={{background:'#fff',borderRadius:16,padding:18,marginBottom:16,border:'1px solid #e2e8f0'}}>
           <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:12}}>
-            {openPost.author_photo?<img src={openPost.author_photo} style={{width:38,height:38,borderRadius:'50%',objectFit:'cover'}} alt=""/>:<div style={{width:38,height:38,borderRadius:'50%',background:openPost.author_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,color:'#fff',fontSize:16}}>{openPost.author_name?.charAt(0)}</div>}
+            <Avatar photo={openPost.author_photo} color={openPost.author_color} name={openPost.author_name}/>
             <div><div style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{openPost.author_name}</div><div style={{fontSize:11,color:'#94a3b8'}}>{fmtDate(openPost.created_at)}</div></div>
           </div>
           <div style={{fontSize:14,color:'#334155',lineHeight:1.7}}>{openPost.body}</div>
-          <button onClick={()=>toggleLike(openPost)} style={{marginTop:12,background:'transparent',border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:6,fontSize:13,color:(openPost.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8',fontWeight:600}}>
-            <I n="heart" s={16} c={(openPost.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8'}/> {(openPost.likes||[]).length}
+          <button onClick={e=>toggleLike(openPost,e)} style={{marginTop:12,background:'transparent',border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:6,fontSize:13,color:(openPost.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8',fontWeight:600}}>
+            <I n="heart" s={16} c={(openPost.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8'}/>{(openPost.likes||[]).length}
           </button>
         </div>
-        {/* Comments */}
         <div style={{fontSize:12,fontWeight:700,color:'#64748b',letterSpacing:1,marginBottom:12}}>{comments.length} COMENTÁRIOS</div>
         {comments.map(c=>(
           <div key={c.id} style={{background:'#fff',borderRadius:14,padding:14,marginBottom:10,border:'1px solid #e2e8f0'}}>
             <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:8}}>
-              {c.author_photo?<img src={c.author_photo} style={{width:30,height:30,borderRadius:'50%',objectFit:'cover'}} alt=""/>:<div style={{width:30,height:30,borderRadius:'50%',background:c.author_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,color:'#fff',fontSize:13}}>{c.author_name?.charAt(0)}</div>}
+              <Avatar photo={c.author_photo} color={c.author_color} name={c.author_name} size={30}/>
               <div><div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{c.author_name}</div><div style={{fontSize:10,color:'#94a3b8'}}>{fmtDate(c.created_at)}</div></div>
             </div>
             <div style={{fontSize:13,color:'#334155',lineHeight:1.6}}>{c.body}</div>
           </div>
         ))}
       </div>
-      <div style={{padding:'12px 16px',background:'#fff',borderTop:'1px solid #e2e8f0',display:'flex',gap:8}}>
+      <div style={{padding:'12px 16px',background:'#fff',borderTop:'1px solid #e2e8f0',display:'flex',gap:8,flexShrink:0}}>
         <input style={{...inp,flex:1}} placeholder="Escreva um comentário..." value={newComment} onChange={e=>setNewComment(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submitComment()}/>
-        <button onClick={submitComment} disabled={!newComment.trim()} style={{padding:'10px 16px',borderRadius:10,border:'none',background:newComment.trim()?'#4f46e5':'#e2e8f0',color:newComment.trim()?'#fff':'#94a3b8',cursor:newComment.trim()?'pointer':'not-allowed',fontWeight:700}}>
+        <button onClick={submitComment} disabled={!newComment.trim()} style={{padding:'10px 14px',borderRadius:10,border:'none',background:newComment.trim()?'#4f46e5':'#e2e8f0',color:newComment.trim()?'#fff':'#94a3b8',cursor:newComment.trim()?'pointer':'not-allowed'}}>
           <I n="send" s={16} c={newComment.trim()?'#fff':'#94a3b8'}/>
         </button>
       </div>
@@ -443,47 +560,35 @@ const ForumView=({user,profiles})=>{
     <div style={{display:'flex',flexDirection:'column',height:'100%',background:'#f8fafc'}}>
       <div style={{padding:'20px 20px 0',flexShrink:0}}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-          <div>
-            <div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:4}}>COMUNIDADE</div>
-            <div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>Fórum</div>
-          </div>
+          <div><div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:4}}>COMUNIDADE</div><div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>Fórum</div></div>
           <button onClick={()=>setShowNew(!showNew)} style={{padding:'9px 16px',borderRadius:12,border:'none',background:'#4f46e5',color:'#fff',cursor:'pointer',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',gap:6}}>
             <I n="plus" s={14} c="#fff"/> Novo post
           </button>
         </div>
-
-        {showNew&&(
-          <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:18,marginBottom:16}}>
-            <input style={{...inp,marginBottom:10}} placeholder="Título do post" value={newTitle} onChange={e=>setNewTitle(e.target.value)}/>
-            <textarea style={{...inp,resize:'none',height:80,fontFamily:'inherit',display:'block',marginBottom:10}} placeholder="Escreva sua mensagem..." value={newBody} onChange={e=>setNewBody(e.target.value)}/>
-            <div style={{display:'flex',gap:8}}>
-              <button onClick={()=>setShowNew(false)} style={{flex:1,padding:'10px',borderRadius:10,background:'#f1f5f9',border:'none',color:'#64748b',cursor:'pointer',fontWeight:700}}>Cancelar</button>
-              <button onClick={submitPost} disabled={posting||!newTitle.trim()||!newBody.trim()} style={{flex:2,padding:'10px',borderRadius:10,background:newTitle.trim()&&newBody.trim()?'#4f46e5':'#c7d2fe',border:'none',color:'#fff',cursor:'pointer',fontWeight:900}}>
-                {posting?'Publicando...':'Publicar'}
-              </button>
-            </div>
+        {showNew&&<div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:18,marginBottom:16}}>
+          <input style={{...inp,marginBottom:10,display:'block'}} placeholder="Título" value={newTitle} onChange={e=>setNewTitle(e.target.value)}/>
+          <textarea style={{...inp,resize:'none',height:80,fontFamily:'inherit',display:'block',marginBottom:10}} placeholder="Escreva sua mensagem..." value={newBody} onChange={e=>setNewBody(e.target.value)}/>
+          <div style={{display:'flex',gap:8}}>
+            <button onClick={()=>setShowNew(false)} style={{flex:1,padding:'10px',borderRadius:10,background:'#f1f5f9',border:'none',color:'#64748b',cursor:'pointer',fontWeight:700}}>Cancelar</button>
+            <button onClick={submitPost} disabled={posting||!newTitle.trim()||!newBody.trim()} style={{flex:2,padding:'10px',borderRadius:10,background:newTitle.trim()&&newBody.trim()?'#4f46e5':'#c7d2fe',border:'none',color:'#fff',cursor:'pointer',fontWeight:900}}>{posting?'Publicando...':'Publicar'}</button>
           </div>
-        )}
+        </div>}
       </div>
-
       <div style={{flex:1,overflowY:'auto',padding:'0 20px 24px'}}>
-        {posts.length===0&&<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:40}}>Nenhum post ainda. Seja o primeiro!</div>}
+        {posts.length===0&&<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:40}}>Nenhum post ainda.</div>}
         {posts.map(p=>(
-          <div key={p.id} onClick={()=>setOpenPost(p)} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:18,marginBottom:12,cursor:'pointer',boxShadow:'0 1px 4px rgba(0,0,0,0.05)',transition:'all 0.15s'}}>
+          <div key={p.id} onClick={()=>setOpenPost(p)} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:18,marginBottom:12,cursor:'pointer',boxShadow:'0 1px 4px rgba(0,0,0,0.05)'}}>
             <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:10}}>
-              {p.author_photo?<img src={p.author_photo} style={{width:36,height:36,borderRadius:'50%',objectFit:'cover'}} alt=""/>:<div style={{width:36,height:36,borderRadius:'50%',background:p.author_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,color:'#fff',fontSize:16,flexShrink:0}}>{p.author_name?.charAt(0)}</div>}
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{p.author_name}</div>
-                <div style={{fontSize:11,color:'#94a3b8'}}>{fmtDate(p.created_at)}</div>
-              </div>
+              <Avatar photo={p.author_photo} color={p.author_color} name={p.author_name}/>
+              <div style={{flex:1,minWidth:0}}><div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{p.author_name}</div><div style={{fontSize:11,color:'#94a3b8'}}>{fmtDate(p.created_at)}</div></div>
             </div>
             <div style={{fontSize:15,fontWeight:700,color:'#0f172a',marginBottom:6}}>{p.title}</div>
             <div style={{fontSize:13,color:'#64748b',lineHeight:1.5,display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden'}}>{p.body}</div>
             <div style={{display:'flex',gap:16,marginTop:12,fontSize:12,color:'#94a3b8'}}>
-              <span style={{display:'flex',alignItems:'center',gap:4,color:(p.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8'}}>
+              <button onClick={e=>toggleLike(p,e)} style={{background:'transparent',border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:4,color:(p.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8',fontWeight:600,padding:0}}>
                 <I n="heart" s={14} c={(p.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8'}/>{(p.likes||[]).length}
-              </span>
-              <span style={{display:'flex',alignItems:'center',gap:4}}><I n="msg" s={14}/> ver comentários</span>
+              </button>
+              <span style={{display:'flex',alignItems:'center',gap:4}}><I n="msg" s={14}/>comentários</span>
             </div>
           </div>
         ))}
@@ -498,6 +603,7 @@ const Auth=({onAuth})=>{
   const[email,setEmail]=useState('')
   const[pass,setPass]=useState('')
   const[name,setName]=useState('')
+  const[city,setCity]=useState('')
   const[loading,setLoading]=useState(false)
   const[err,setErr]=useState('')
   const s={width:'100%',padding:'12px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:14,outline:'none'}
@@ -508,8 +614,8 @@ const Auth=({onAuth})=>{
       if(mode==='signup'){
         const color=rndColor()
         const c=await createUserWithEmailAndPassword(auth,email,pass)
-        await setDoc(doc(db,'profiles',c.user.uid),{uid:c.user.uid,display_name:name,username:`@${name.toLowerCase().replace(/\s+/g,'')}`,avatar_color:color,km_total:0,points:0,is_admin:false,created_at:serverTimestamp()})
-        onAuth({uid:c.user.uid,display_name:name,avatar_color:color,km_total:0,points:0,is_admin:false})
+        await setDoc(doc(db,'profiles',c.user.uid),{uid:c.user.uid,display_name:name,username:`@${name.toLowerCase().replace(/\s+/g,'')}`,avatar_color:color,km_total:0,points:0,is_admin:false,city:city||'',created_at:serverTimestamp()})
+        onAuth({uid:c.user.uid,display_name:name,avatar_color:color,km_total:0,points:0,is_admin:false,city:city||''})
       }else{
         const c=await signInWithEmailAndPassword(auth,email,pass)
         const snap=await getDoc(doc(db,'profiles',c.user.uid))
@@ -535,6 +641,7 @@ const Auth=({onAuth})=>{
         </div>
         <div style={{display:'flex',flexDirection:'column',gap:10}}>
           {mode==='signup'&&<input style={s} placeholder="Seu nome" value={name} onChange={e=>setName(e.target.value)}/>}
+          {mode==='signup'&&<input style={s} placeholder="Sua cidade (ex: São Paulo)" value={city} onChange={e=>setCity(e.target.value)}/>}
           <input style={s} type="email" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()}/>
           <input style={s} type="password" placeholder="Senha" value={pass} onChange={e=>setPass(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()}/>
         </div>
@@ -552,7 +659,7 @@ const GeoBar=({geo})=>{
   return <div style={{position:'absolute',bottom:20,left:'50%',transform:'translateX(-50%)',background:bg,border:`1px solid ${c}40`,borderRadius:20,padding:'7px 16px',display:'flex',alignItems:'center',gap:8,fontSize:11,fontWeight:600,color:c,zIndex:1000,whiteSpace:'nowrap',boxShadow:'0 4px 20px rgba(0,0,0,0.12)'}}><I n={geo.loading?'zap':geo.err?'warn':'wifi'} s={13} c={c}/>{txt}</div>
 }
 
-// ── Main ──────────────────────────────────────────────────────
+// ── Main App ──────────────────────────────────────────────────
 export default function App(){
   const[user,setUser]=useState(null)
   const[loading,setLoading]=useState(true)
@@ -562,9 +669,10 @@ export default function App(){
   const[profiles,setProfiles]=useState({})
   const[selected,setSelected]=useState(null)
   const[addMode,setAddMode]=useState(false)
-  const[editingPoint,setEditingPoint]=useState(null) // {point} or {lat,lng} for new
+  const[editingPoint,setEditingPoint]=useState(null)
   const[toast,setToast]=useState(null)
   const[leaflet,setLeaflet]=useState(!!window.L)
+  const[loadingNeighborhoods,setLoadingNeighborhoods]=useState(false)
   const geo=useGeo()
 
   useEffect(()=>{
@@ -589,11 +697,14 @@ export default function App(){
     return()=>{u1();u2()}
   },[user])
 
+  // Auto-sync neighborhoods
+  useNeighborhoodSync(geo,user,points,setLoadingNeighborhoods)
+
   const toast$=(msg,type='ok')=>{setToast({msg,type});setTimeout(()=>setToast(null),4000)}
 
   const handleCheckin=r=>{
     if(!r.ok){toast$(`❌ ${r.error}`,'err');return}
-    toast$(r.action==='conquered'?`🏆 Território conquistado! +${r.pts} pts`:`📍 Check-in registrado! (${fmtD(r.dist)})`,'ok')
+    toast$(r.action==='conquered'?`🏆 Território conquistado! +${r.pts} pts`:`📍 Check-in! (${fmtD(r.dist)})`,'ok')
   }
 
   const handleBattle=async pt=>{
@@ -601,19 +712,16 @@ export default function App(){
     toast$(`⚔️ Batalha iniciada em ${pt.name}!`,'warn');setTab('battles')
   }
 
-  // Save new point
   const handleSaveNewPoint=async form=>{
-    await addDoc(collection(db,'conquest_points'),{name:form.name,type:form.type,lat:editingPoint.lat,lng:editingPoint.lng,radius_m:parseInt(form.radius),base_points:form.type==='AREA'?300:100,owner_id:null,owner_km:0,created_by:user.uid,created_at:serverTimestamp()})
+    await addDoc(collection(db,'conquest_points'),{name:form.name,type:form.type,lat:editingPoint.lat,lng:editingPoint.lng,radius_m:parseInt(form.radius),base_points:form.type==='AREA'?300:100,owner_id:null,owner_km:0,source:'admin',created_by:user.uid,created_at:serverTimestamp()})
     setEditingPoint(null);setAddMode(false);toast$(`✅ "${form.name}" adicionado!`,'ok')
   }
 
-  // Update existing point
   const handleUpdatePoint=async form=>{
     await updateDoc(doc(db,'conquest_points',editingPoint.point.id),{name:form.name,type:form.type,radius_m:parseInt(form.radius),base_points:form.type==='AREA'?300:100,updated_at:serverTimestamp()})
     setEditingPoint(null);setSelected(null);toast$(`✅ Ponto atualizado!`,'ok')
   }
 
-  // Delete point
   const handleDeletePoint=async()=>{
     await deleteDoc(doc(db,'conquest_points',editingPoint.point.id))
     setEditingPoint(null);setSelected(null);toast$(`🗑️ Ponto removido.`,'ok')
@@ -657,7 +765,7 @@ export default function App(){
           <div style={{width:8,height:8,borderRadius:'50%',background:geo.lat?'#10b981':geo.loading?'#f59e0b':'#ef4444',margin:'0 auto 3px'}}/>
           <span style={{fontSize:7,color:'#94a3b8',fontWeight:600}}>GPS</span>
         </div>
-        <div onClick={()=>setTab('profile')} style={{width:40,height:40,borderRadius:'50%',overflow:'hidden',border:'2px solid #e2e8f0',cursor:'pointer'}}>
+        <div onClick={()=>setTab('profile')} style={{width:40,height:40,borderRadius:'50%',overflow:'hidden',border:'2px solid #e2e8f0',cursor:'pointer',flexShrink:0}}>
           {user.photo_url?<img src={user.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',background:user.avatar_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:17,color:'#fff'}}>{user.display_name?.charAt(0)||'?'}</div>}
         </div>
       </nav>
@@ -665,28 +773,23 @@ export default function App(){
       <div style={{flex:1,position:'relative',overflow:'hidden'}}>
 
         {tab==='map'&&<>
-          {leaflet?<LeafletMap points={points} geo={geo} profiles={profiles} selectedId={selected?.id} battles={battles} addMode={addMode} onSelect={setSelected} onMapClick={({lat,lng})=>{setEditingPoint({lat,lng});setAddMode(false)}}/>:<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',fontSize:14,color:'#94a3b8'}}>Carregando mapa...</div>}
+          {leaflet?<LeafletMap points={points} geo={geo} profiles={profiles} selectedId={selected?.id} battles={battles} addMode={addMode} onSelect={setSelected} onMapClick={({lat,lng})=>{setEditingPoint({lat,lng});setAddMode(false)}}/>:<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',color:'#94a3b8'}}>Carregando mapa...</div>}
           <GeoBar geo={geo}/>
+          <NeighborhoodLoader loading={loadingNeighborhoods} count={points.length}/>
           {user.is_admin&&<button onClick={()=>{setAddMode(!addMode);setEditingPoint(null)}} style={{position:'absolute',top:16,left:16,background:addMode?'#4f46e5':'#fff',border:`2px solid ${addMode?'#4f46e5':'#e2e8f0'}`,borderRadius:12,color:addMode?'#fff':'#64748b',cursor:'pointer',padding:'9px 16px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:700,boxShadow:'0 2px 8px rgba(0,0,0,0.1)',zIndex:1000}}>
-            <I n="plus" s={14} c={addMode?'#fff':'#64748b'}/>{addMode?'Clique no mapa...':'Adicionar Ponto'}
+            <I n="plus" s={14} c={addMode?'#fff':'#64748b'}/>{addMode?'Clique no mapa...':'+ Ponto'}
           </button>}
           <Panel point={selected} geo={geo} user={user} battles={battles} profiles={profiles} onBattle={handleBattle} onCheckin={handleCheckin} onClose={()=>setSelected(null)} onEdit={pt=>setEditingPoint({point:pt})}/>
         </>}
 
-        {/* Point form modal */}
         {editingPoint&&<div style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.4)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000,padding:16}}>
           {editingPoint.point?
             <PointForm initial={editingPoint.point} onSave={handleUpdatePoint} onCancel={()=>setEditingPoint(null)} onDelete={handleDeletePoint}/>:
-            <PointForm lat={editingPoint.lat} lng={editingPoint.lng} onSave={handleSaveNewPoint} onCancel={()=>setEditingPoint(null)}/>
-          }
+            <PointForm lat={editingPoint.lat} lng={editingPoint.lng} onSave={handleSaveNewPoint} onCancel={()=>setEditingPoint(null)}/>}
         </div>}
 
         {tab==='nearby'&&<div style={{overflowY:'auto',height:'100%',background:'#f8fafc',padding:24}}>
-          <div style={{marginBottom:20}}>
-            <div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:4}}>GEOLOCALIZAÇÃO</div>
-            <div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>Pontos Próximos</div>
-            {geo.lat&&<div style={{fontSize:12,color:'#64748b',marginTop:4}}>±{Math.round(geo.acc||0)}m · {nearby.length} em 2km</div>}
-          </div>
+          <div style={{marginBottom:20}}><div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:4}}>GEOLOCALIZAÇÃO</div><div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>Pontos Próximos</div>{geo.lat&&<div style={{fontSize:12,color:'#64748b',marginTop:4}}>±{Math.round(geo.acc||0)}m · {nearby.length} em 2km</div>}</div>
           {geo.loading&&<div style={{color:'#d97706',background:'#fffbeb',padding:'12px 16px',borderRadius:10,fontSize:13}}>⏳ Aguardando GPS...</div>}
           {geo.err&&<div style={{color:'#dc2626',background:'#fef2f2',padding:'12px 16px',borderRadius:10,fontSize:13}}>{geo.err}</div>}
           {[...nearby].map(p=>({...p,_d:hav(geo.lat,geo.lng,p.lat,p.lng)})).sort((a,b)=>a._d-b._d).map(p=>{
@@ -721,7 +824,9 @@ export default function App(){
               <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
                 {[{u:att,n:b.attacker_name,km:b.attacker_km,c:ac},{u:def,n:b.defender_name,km:b.defender_km,c:dc}].map((x,i)=>(
                   <div key={i} style={{flex:1,textAlign:'center'}}>
-                    <div style={{width:44,height:44,borderRadius:'50%',background:x.c,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,color:'#fff',fontSize:20,margin:'0 auto 6px'}}>{(x.u?.display_name||x.n||'?').charAt(0)}</div>
+                    <div style={{width:44,height:44,borderRadius:'50%',overflow:'hidden',margin:'0 auto 6px'}}>
+                      {x.u?.photo_url?<img src={x.u.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',background:x.c,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,color:'#fff',fontSize:20}}>{(x.u?.display_name||x.n||'?').charAt(0)}</div>}
+                    </div>
                     <div style={{fontSize:12,color:'#0f172a',fontWeight:600}}>{x.u?.display_name||x.n}</div>
                     <div style={{fontSize:16,fontWeight:900,color:x.c}}>{x.km}km</div>
                   </div>
@@ -746,10 +851,7 @@ export default function App(){
               <div style={{width:44,height:44,borderRadius:'50%',overflow:'hidden',flexShrink:0}}>
                 {u.photo_url?<img src={u.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',background:u.avatar_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:19,color:'#fff'}}>{u.display_name?.charAt(0)||'?'}</div>}
               </div>
-              <div style={{flex:1}}>
-                <div style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{u.display_name}</div>
-                <div style={{fontSize:11,color:'#64748b'}}>{u.km_total||0} km · {points.filter(p=>p.owner_id===id).length} territórios{u.city?` · ${u.city}`:''}</div>
-              </div>
+              <div style={{flex:1}}><div style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{u.display_name}</div><div style={{fontSize:11,color:'#64748b'}}>{u.km_total||0} km · {points.filter(p=>p.owner_id===id).length} territórios{u.city?` · ${u.city}`:''}</div></div>
               <div style={{textAlign:'right'}}><div style={{fontSize:20,fontWeight:900,color:'#4f46e5'}}>{u.points||0}</div><div style={{fontSize:10,color:'#94a3b8',fontWeight:600}}>pts</div></div>
             </div>
           ))}
@@ -757,7 +859,6 @@ export default function App(){
         </div>}
 
         {tab==='forum'&&<ForumView user={user} profiles={profiles}/>}
-
         {tab==='profile'&&<ProfileView user={user} points={points} onUpdate={u=>{setUser(u);setProfiles(p=>({...p,[u.uid]:u}))}}/>}
 
         {toast&&<div style={{position:'absolute',bottom:20,left:'50%',transform:'translateX(-50%)',background:t.bg,border:`1px solid ${t.bo}`,borderRadius:12,padding:'12px 20px',zIndex:2000,fontSize:13,fontWeight:600,color:t.tx,boxShadow:'0 8px 32px rgba(0,0,0,0.12)',whiteSpace:'nowrap',animation:'su 0.3s ease'}}>{toast.msg}</div>}
