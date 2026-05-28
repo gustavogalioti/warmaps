@@ -822,7 +822,8 @@ export default function App(){
   const[leaflet,setLeaflet]=useState(!!window.L)
   const[loadingNeighborhoods,setLoadingNeighborhoods]=useState(false)
   const[neighborhoodStatus,setNeighborhoodStatus]=useState('idle')
-  const geo=useGeo(user,handleKmUpdate)
+  const kmCallbackRef=useRef(null)
+  const geo=useGeo(user,(...args)=>kmCallbackRef.current?.(...args))
 
   useEffect(()=>{
     if(window.L){setLeaflet(true);return}
@@ -902,6 +903,9 @@ export default function App(){
     }catch(e){console.error('KM save error:',e)}
   },[user,points,battles])
 
+  // Connect km callback ref after handleKmUpdate is defined
+  useEffect(()=>{kmCallbackRef.current=handleKmUpdate},[handleKmUpdate])
+
   const handleClearAndResync=async()=>{
     if(!window.confirm('Apagar todos os bairros importados e reimportar? Os pontos manuais serão mantidos.'))return
     toast$('🗑️ Limpando pontos antigos...','warn')
@@ -965,6 +969,9 @@ export default function App(){
         {tab==='map'&&<>
           {leaflet?<LeafletMap points={points} geo={geo} profiles={profiles} selectedId={selected?.id} battles={battles} addMode={addMode} onSelect={setSelected} onMapClick={({lat,lng})=>{setEditingPoint({lat,lng});setAddMode(false)}}/>:<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',color:'#94a3b8'}}>Carregando mapa...</div>}
           <GeoBar geo={geo}/>
+          {user&&(user.km_total||0)>0&&<div style={{position:'absolute',bottom:56,left:'50%',transform:'translateX(-50%)',background:'rgba(79,70,229,0.9)',color:'#fff',borderRadius:20,padding:'5px 14px',fontSize:12,fontWeight:700,zIndex:1000,whiteSpace:'nowrap'}}>
+            🏃 {(user.km_total||0).toFixed(2)} km acumulados
+          </div>}
           <NeighborhoodLoader loading={loadingNeighborhoods} status={neighborhoodStatus} count={points.length} geo={geo} onManualSync={()=>geo.lat&&syncArea(geo.lat,geo.lng,true)}/>
           {user.is_admin&&<div style={{position:'absolute',top:16,left:16,display:'flex',gap:8,zIndex:1000}}>
             <button onClick={()=>{setAddMode(!addMode);setEditingPoint(null)}} style={{background:addMode?'#4f46e5':'#fff',border:`2px solid ${addMode?'#4f46e5':'#e2e8f0'}`,borderRadius:12,color:addMode?'#fff':'#64748b',cursor:'pointer',padding:'9px 16px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:700,boxShadow:'0 2px 8px rgba(0,0,0,0.1)'}}>
