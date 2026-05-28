@@ -97,10 +97,10 @@ const useNeighborhoodSync=(geo,user,points,setLoadingNeighborhoods)=>{
       // Fetch neighborhoods from OSM
       const neighborhoods=await fetchNeighborhoodsByLocation(lat,lng)
 
-      // Save only new ones
-      let added=0
-      for(const n of neighborhoods){
-        if(existingOsmIds.has(n.osm_id))continue
+      // Save all new ones (up to 50 per sync)
+      const newOnes=neighborhoods.filter(n=>!existingOsmIds.has(n.osm_id)).slice(0,50)
+      console.log(`OSM found ${neighborhoods.length} neighborhoods, ${newOnes.length} new`)
+      for(const n of newOnes){
         await addDoc(collection(db,'conquest_points'),{
           ...n,
           source:'osm',
@@ -108,8 +108,6 @@ const useNeighborhoodSync=(geo,user,points,setLoadingNeighborhoods)=>{
           owner_km:0,
           created_at:serverTimestamp(),
         })
-        added++
-        if(added>=5)break // batch of 5 per call to avoid rate limits
       }
     }catch(e){console.warn('Sync error:',e)}
     setLoadingNeighborhoods(false)
@@ -405,13 +403,15 @@ const ProfileView=({user,points,onUpdate})=>{
 
   return(
     <div style={{overflowY:'auto',height:'100%',background:'#f8fafc'}}>
-      <div style={{height:120,background:`linear-gradient(135deg,${user.avatar_color||'#4f46e5'},${user.avatar_color||'#7c3aed'})`,position:'relative',flexShrink:0}}>
+      {/* Banner */}
+      <div style={{height:110,background:`linear-gradient(135deg,${user.avatar_color||'#4f46e5'},${user.avatar_color||'#7c3aed'})`,position:'relative',overflow:'hidden',flexShrink:0}}>
         <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',fontSize:70,opacity:0.12}}>⚔️</div>
       </div>
       <div style={{padding:'0 20px 24px'}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-end',marginTop:-36,marginBottom:16}}>
-          <div style={{width:72,height:72,borderRadius:'50%',overflow:'hidden',border:'4px solid #f8fafc',boxShadow:'0 4px 12px rgba(0,0,0,0.15)',flexShrink:0}}>
-            {form.photo_url?<img src={form.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',background:user.avatar_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:30,color:'#fff'}}>{user.display_name?.charAt(0)||'?'}</div>}
+        {/* Avatar row — sits below banner */}
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:12,marginBottom:16}}>
+          <div style={{width:72,height:72,borderRadius:'50%',overflow:'hidden',border:'4px solid #f8fafc',boxShadow:'0 4px 12px rgba(0,0,0,0.15)',flexShrink:0,marginTop:-48,background:user.avatar_color||'#4f46e5'}}>
+            {form.photo_url?<img src={form.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:30,color:'#fff'}}>{user.display_name?.charAt(0)||'?'}</div>}
           </div>
           <button onClick={()=>setEditing(!editing)} style={{padding:'8px 16px',borderRadius:10,border:`1px solid ${editing?'#dc2626':'#e2e8f0'}`,background:editing?'#fef2f2':'#fff',color:editing?'#dc2626':'#64748b',cursor:'pointer',fontWeight:700,fontSize:12,display:'flex',alignItems:'center',gap:6}}>
             <I n={editing?'x':'edit'} s={14} c={editing?'#dc2626':'#64748b'}/>{editing?'Cancelar':'Editar'}
