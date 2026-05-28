@@ -745,6 +745,206 @@ const ForumView=({user})=>{
 }
 
 
+
+// ── Notification History ──────────────────────────────────────
+const NotifHistory=()=>{
+  const[notifs,setNotifs]=useState([])
+  useEffect(()=>onSnapshot(
+    query(collection(db,'notifications'),orderBy('created_at','desc')),
+    s=>setNotifs(s.docs.map(d=>({id:d.id,...d.data()})))
+  ),[])
+  if(!notifs.length)return<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:16}}>Nenhum comunicado enviado ainda.</div>
+  return(<div>
+    <div style={{fontSize:12,fontWeight:700,color:'#64748b',letterSpacing:1,marginBottom:10}}>HISTORICO</div>
+    {notifs.map(n=>(
+      <div key={n.id} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:12,padding:14,marginBottom:10}}>
+        <div style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:4}}>{n.title}</div>
+        <div style={{fontSize:13,color:'#64748b',lineHeight:1.5,marginBottom:8}}>{n.message}</div>
+        <div style={{fontSize:11,color:'#94a3b8'}}>Por {n.from} · {n.created_at?.toDate?.()?.toLocaleDateString('pt-BR')||''}</div>
+      </div>
+    ))}
+  </div>)
+}
+
+
+// ── Admin View ────────────────────────────────────────────────
+const AdminView=({user,points})=>{
+  const[tab,setTab]=useState('users')
+  const[users,setUsers]=useState([])
+  const[loading,setLoading]=useState(true)
+  const[search,setSearch]=useState('')
+  const[editUser,setEditUser]=useState(null)
+  const[editForm,setEditForm]=useState({})
+  const[notifMsg,setNotifMsg]=useState('')
+  const[notifTitle,setNotifTitle]=useState('')
+  const[sending,setSending]=useState(false)
+  const[sent,setSent]=useState(false)
+  const[confirm,setConfirm]=useState(null)
+
+  useEffect(()=>{
+    setLoading(true)
+    return onSnapshot(collection(db,'profiles'),s=>{
+      setUsers(s.docs.map(d=>({id:d.id,...d.data()})))
+      setLoading(false)
+    })
+  },[])
+
+  const sendNotification=async()=>{
+    if(!notifTitle.trim()||!notifMsg.trim())return
+    setSending(true)
+    await addDoc(collection(db,'notifications'),{title:notifTitle.trim(),message:notifMsg.trim(),from:user.display_name,from_uid:user.uid,type:'general',read_by:[],created_at:serverTimestamp()})
+    setNotifTitle('');setNotifMsg('');setSent(true)
+    setTimeout(()=>setSent(false),3000)
+    setSending(false)
+  }
+
+  const openEdit=(u)=>{setEditUser(u);setEditForm({display_name:u.display_name||'',username:u.username||'',city:u.city||'',age:u.age||'',points:u.points||0,km_total:u.km_total||0,bio:u.bio||''})}
+
+  const saveEdit=async()=>{
+    await updateDoc(doc(db,'profiles',editUser.id),{...editForm,points:parseInt(editForm.points)||0,km_total:parseFloat(editForm.km_total)||0,updated_at:serverTimestamp()})
+    setEditUser(null)
+  }
+
+  const deleteUserFn=async(uid)=>{
+    await deleteDoc(doc(db,'profiles',uid))
+    const theirPts=points.filter(p=>p.owner_id===uid)
+    await Promise.all(theirPts.map(p=>updateDoc(doc(db,'conquest_points',p.id),{owner_id:null,owner_name:null,owner_color:null,owner_km:0})))
+    setConfirm(null)
+  }
+
+  const toggleAdmin=async(uid,cur)=>updateDoc(doc(db,'profiles',uid),{is_admin:!cur})
+
+  const filtered=users.filter(u=>
+    !search||(u.display_name||'').toLowerCase().includes(search.toLowerCase())||
+    (u.username||'').toLowerCase().includes(search.toLowerCase())||
+    (u.city||'').toLowerCase().includes(search.toLowerCase())
+  )
+
+  const inp={width:'100%',padding:'10px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:13,outline:'none',marginBottom:8}
+  const tabs=[['users','Usuários'],['notif','Comunicados'],['stats','Estatísticas']]
+
+  return(
+    <div style={{display:'flex',flexDirection:'column',height:'100%',background:'#f8fafc'}}>
+      <div style={{padding:'16px 20px 0',flexShrink:0,background:'#fff',borderBottom:'1px solid #e2e8f0'}}>
+        <div style={{fontSize:11,fontWeight:700,color:'#dc2626',letterSpacing:2,marginBottom:2}}>PAINEL</div>
+        <div style={{fontSize:22,fontWeight:900,color:'#0f172a',marginBottom:12}}>Administração</div>
+        <div style={{display:'flex',gap:6,paddingBottom:12}}>
+          {tabs.map(([id,l])=>(
+            <button key={id} onClick={()=>setTab(id)} style={{padding:'7px 16px',borderRadius:20,border:'none',cursor:'pointer',background:tab===id?'#4f46e5':'#f1f5f9',color:tab===id?'#fff':'#64748b',fontSize:12,fontWeight:700}}>
+              {l}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {tab==='users'&&<div style={{flex:1,overflowY:'auto',padding:16}}>
+        <div style={{position:'relative',marginBottom:12}}>
+          <input style={{...inp,marginBottom:0,paddingLeft:36}} placeholder="Buscar nome, cidade, username..." value={search} onChange={e=>setSearch(e.target.value)}/>
+          <span style={{position:'absolute',left:12,top:11}}>🔍</span>
+        </div>
+        <div style={{fontSize:12,color:'#94a3b8',marginBottom:12,fontWeight:600}}>{filtered.length}/{users.length} usuários</div>
+        {loading&&<div style={{textAlign:'center',color:'#94a3b8',padding:20}}>Carregando...</div>}
+        {filtered.map(u=>{
+          const myPts=points.filter(p=>p.owner_id===u.id).length
+          return(
+            <div key={u.id} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:14,marginBottom:10,boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
+              <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:10}}>
+                {u.photo_url?<img src={u.photo_url} style={{width:44,height:44,borderRadius:'50%',objectFit:'cover',flexShrink:0}} alt=""/>
+                  :<div style={{width:44,height:44,borderRadius:'50%',background:u.avatar_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:19,color:'#fff',flexShrink:0}}>{u.display_name?.charAt(0)||'?'}</div>}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                    <span style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{u.display_name}</span>
+                    {u.is_admin&&<span style={{fontSize:9,fontWeight:700,color:'#4f46e5',background:'#eef2ff',padding:'2px 7px',borderRadius:20}}>ADM</span>}
+                  </div>
+                  <div style={{fontSize:11,color:'#94a3b8'}}>{u.username||''}{u.city?' · '+u.city:''}{u.age?' · '+u.age+'a':''}</div>
+                  <div style={{fontSize:11,color:'#64748b',marginTop:2}}>
+                    {u.bio&&<div style={{marginTop:2,fontStyle:'italic',color:'#94a3b8',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{u.bio}</div>}
+                    <span>⭐{u.points||0} · 🏃{(u.km_total||0).toFixed(1)}km · ⚑{myPts}</span>
+                  </div>
+                </div>
+              </div>
+              <div style={{fontSize:10,color:'#94a3b8',background:'#f8fafc',borderRadius:6,padding:'3px 8px',fontFamily:'monospace',marginBottom:8,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>UID: {u.id}</div>
+              <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+                <button onClick={()=>openEdit(u)} style={{padding:'6px 12px',borderRadius:8,background:'#eef2ff',border:'none',color:'#4f46e5',cursor:'pointer',fontSize:12,fontWeight:700}}>✏️ Editar</button>
+                <button onClick={()=>toggleAdmin(u.id,u.is_admin)} style={{padding:'6px 12px',borderRadius:8,background:u.is_admin?'#fef2f2':'#f0fdf4',border:'none',color:u.is_admin?'#dc2626':'#059669',cursor:'pointer',fontSize:12,fontWeight:700}}>
+                  {u.is_admin?'❌ Remover ADM':'👑 Tornar ADM'}
+                </button>
+                {u.id!==user.uid&&<button onClick={()=>setConfirm({id:u.id,name:u.display_name})} style={{padding:'6px 12px',borderRadius:8,background:'#fef2f2',border:'none',color:'#dc2626',cursor:'pointer',fontSize:12,fontWeight:700}}>🗑️ Apagar</button>}
+              </div>
+            </div>
+          )
+        })}
+      </div>}
+
+      {tab==='notif'&&<div style={{flex:1,overflowY:'auto',padding:16}}>
+        <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:18,marginBottom:16}}>
+          <div style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:14}}>Enviar para todos os jogadores</div>
+          <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:4}}>Título</label>
+          <input style={inp} placeholder="Ex: Nova funcionalidade disponível!" value={notifTitle} onChange={e=>setNotifTitle(e.target.value)}/>
+          <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:4}}>Mensagem</label>
+          <textarea style={{...inp,resize:'none',height:90,fontFamily:'inherit'}} placeholder="Escreva o comunicado..." value={notifMsg} onChange={e=>setNotifMsg(e.target.value)}/>
+          <button onClick={sendNotification} disabled={sending||!notifTitle.trim()||!notifMsg.trim()} style={{width:'100%',padding:'12px',borderRadius:12,border:'none',background:notifTitle.trim()&&notifMsg.trim()?'#4f46e5':'#c7d2fe',color:'#fff',fontWeight:900,cursor:'pointer',fontSize:13}}>
+            {sending?'Enviando...':sent?'✅ Enviado com sucesso!':'Enviar comunicado'}
+          </button>
+        </div>
+        <NotifHistory/>
+      </div>}
+
+      {tab==='stats'&&<div style={{flex:1,overflowY:'auto',padding:16}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:16}}>
+          {[['Jogadores',users.length,'👥'],['Territórios',points.length,'⚑'],['Conquistados',points.filter(p=>p.owner_id).length,'🏆'],['Livres',points.filter(p=>!p.owner_id).length,'🏳️'],['KMs totais',users.reduce((s,u)=>s+(u.km_total||0),0).toFixed(1)+'km','🏃'],['Pontos totais',users.reduce((s,u)=>s+(u.points||0),0),'⭐']].map(([l,v,ic])=>(
+            <div key={l} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:'14px 12px',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
+              <div style={{fontSize:20,marginBottom:4}}>{ic}</div>
+              <div style={{fontSize:19,fontWeight:900,color:'#4f46e5'}}>{v}</div>
+              <div style={{fontSize:10,color:'#94a3b8',fontWeight:600}}>{l}</div>
+            </div>
+          ))}
+        </div>
+        <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:16}}>
+          <div style={{fontSize:13,fontWeight:700,color:'#0f172a',marginBottom:10}}>Top jogadores</div>
+          {[...users].sort((a,b)=>(b.points||0)-(a.points||0)).slice(0,5).map((u,i)=>(
+            <div key={u.id} style={{display:'flex',alignItems:'center',gap:10,marginBottom:8,padding:'8px 0',borderBottom:'1px solid #f1f5f9'}}>
+              <span style={{fontSize:16,width:24}}>{['🥇','🥈','🥉','4️⃣','5️⃣'][i]}</span>
+              <div style={{width:32,height:32,borderRadius:'50%',background:u.avatar_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,color:'#fff',fontSize:14}}>{u.display_name?.charAt(0)}</div>
+              <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{u.display_name}</div><div style={{fontSize:11,color:'#64748b'}}>{u.city||''}</div></div>
+              <div style={{textAlign:'right'}}><div style={{fontSize:14,fontWeight:900,color:'#4f46e5'}}>{u.points||0}</div><div style={{fontSize:10,color:'#94a3b8'}}>pts</div></div>
+            </div>
+          ))}
+        </div>
+      </div>}
+
+      {/* Edit User Modal */}
+      {editUser&&<div style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:200,padding:16}}>
+        <div style={{background:'#fff',borderRadius:20,padding:24,width:'100%',maxWidth:360,maxHeight:'85vh',overflowY:'auto'}}>
+          <div style={{fontSize:16,fontWeight:900,color:'#0f172a',marginBottom:16}}>Editar: {editUser.display_name}</div>
+          {[['Nome','display_name','text'],['Username','username','text'],['Cidade','city','text'],['Idade','age','number'],['Pontos','points','number'],['KMs','km_total','number'],['Bio','bio','text']].map(([l,k,t])=>(
+            <div key={k}>
+              <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:3}}>{l}</label>
+              <input style={inp} type={t} value={editForm[k]||''} onChange={e=>setEditForm(f=>({...f,[k]:e.target.value}))}/>
+            </div>
+          ))}
+          <div style={{display:'flex',gap:8,marginTop:8}}>
+            <button onClick={()=>setEditUser(null)} style={{flex:1,padding:'11px',borderRadius:10,background:'#f1f5f9',border:'none',color:'#64748b',cursor:'pointer',fontWeight:700}}>Cancelar</button>
+            <button onClick={saveEdit} style={{flex:2,padding:'11px',borderRadius:10,background:'#4f46e5',border:'none',color:'#fff',cursor:'pointer',fontWeight:900}}>Salvar</button>
+          </div>
+        </div>
+      </div>}
+
+      {/* Delete Confirm Modal */}
+      {confirm&&<div style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:200,padding:16}}>
+        <div style={{background:'#fff',borderRadius:20,padding:24,width:'100%',maxWidth:320}}>
+          <div style={{fontSize:16,fontWeight:900,color:'#dc2626',marginBottom:8}}>Apagar usuário?</div>
+          <div style={{fontSize:14,color:'#64748b',marginBottom:20}}>"{confirm.name}" será removido permanentemente e perderá todos os territórios.</div>
+          <div style={{display:'flex',gap:8}}>
+            <button onClick={()=>setConfirm(null)} style={{flex:1,padding:'11px',borderRadius:10,background:'#f1f5f9',border:'none',color:'#64748b',cursor:'pointer',fontWeight:700}}>Cancelar</button>
+            <button onClick={()=>deleteUserFn(confirm.id)} style={{flex:1,padding:'11px',borderRadius:10,background:'#dc2626',border:'none',color:'#fff',cursor:'pointer',fontWeight:900}}>Apagar</button>
+          </div>
+        </div>
+      </div>}
+    </div>
+  )
+}
+
 // ── Auth ──────────────────────────────────────────────────────
 const Auth=({onAuth})=>{
   const[mode,setMode]=useState('login')
@@ -819,6 +1019,8 @@ export default function App(){
   const[addMode,setAddMode]=useState(false)
   const[editingPoint,setEditingPoint]=useState(null)
   const[toast,setToast]=useState(null)
+  const[notifications,setNotifications]=useState([])
+  const[showNotifs,setShowNotifs]=useState(false)
   const[leaflet,setLeaflet]=useState(!!window.L)
   const[loadingNeighborhoods,setLoadingNeighborhoods]=useState(false)
   const[neighborhoodStatus,setNeighborhoodStatus]=useState('idle')
@@ -844,7 +1046,11 @@ export default function App(){
     const u1=onSnapshot(collection(db,'conquest_points'),s=>setPoints(s.docs.map(d=>({id:d.id,...d.data()}))))
     const u2=onSnapshot(query(collection(db,'battles'),where('status','==','active')),s=>setBattles(s.docs.map(d=>({id:d.id,...d.data()}))))
     getDocs(collection(db,'profiles')).then(s=>{const m={};s.docs.forEach(d=>m[d.id]=d.data());setProfiles(m)})
-    return()=>{u1();u2()}
+    // Load notifications
+    const u3=onSnapshot(query(collection(db,'notifications'),orderBy('created_at','desc')),s=>{
+      setNotifications(s.docs.map(d=>({id:d.id,...d.data()})))
+    })
+    return()=>{u1();u2();u3()}
   },[user])
 
   // Auto-sync neighborhoods
@@ -940,6 +1146,7 @@ export default function App(){
     {id:'ranking',n:'trophy',l:'Ranking'},
     {id:'forum',n:'forum',l:'Fórum'},
     {id:'profile',n:'user',l:'Perfil'},
+    ...(user?.is_admin?[{id:'admin',n:'settings',l:'ADM'}]:[]),
   ]
 
   return(
@@ -959,6 +1166,10 @@ export default function App(){
           <div style={{width:8,height:8,borderRadius:'50%',background:geo.lat?'#10b981':geo.loading?'#f59e0b':'#ef4444',margin:'0 auto 3px'}}/>
           <span style={{fontSize:7,color:'#94a3b8',fontWeight:600}}>GPS</span>
         </div>
+        <button onClick={()=>setShowNotifs(!showNotifs)} style={{position:'relative',background:'none',border:'none',cursor:'pointer',marginBottom:8,padding:4}}>
+          <I n="bell" s={20} c={notifications.filter(n=>!(n.read_by||[]).includes(user?.uid)).length>0?'#f59e0b':'#94a3b8'}/>
+          {notifications.filter(n=>!(n.read_by||[]).includes(user?.uid)).length>0&&<div style={{position:'absolute',top:0,right:0,width:14,height:14,borderRadius:'50%',background:'#f59e0b',display:'flex',alignItems:'center',justifyContent:'center',fontSize:8,fontWeight:900,color:'#fff'}}>{notifications.filter(n=>!(n.read_by||[]).includes(user?.uid)).length}</div>}
+        </button>
         <div onClick={()=>setTab('profile')} style={{width:40,height:40,borderRadius:'50%',overflow:'hidden',border:'2px solid #e2e8f0',cursor:'pointer',flexShrink:0}}>
           {user.photo_url?<img src={user.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',background:user.avatar_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:17,color:'#fff'}}>{user.display_name?.charAt(0)||'?'}</div>}
         </div>
@@ -1062,7 +1273,28 @@ export default function App(){
 
         {tab==='forum'&&<div style={{height:'100%',display:'flex',flexDirection:'column'}}><ForumView user={user}/></div>}
         {tab==='profile'&&<ProfileView user={user} points={points} onUpdate={u=>{setUser(u);setProfiles(p=>({...p,[u.uid]:u}))}}/>}
+        {tab==='admin'&&user?.is_admin&&<AdminView user={user} points={points}/>}
 
+        {showNotifs&&<div style={{position:'absolute',top:0,left:68,width:300,height:'100%',background:'#fff',zIndex:500,display:'flex',flexDirection:'column',boxShadow:'4px 0 20px rgba(0,0,0,0.1)'}}>
+          <div style={{padding:'16px 20px',borderBottom:'1px solid #e2e8f0',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <div style={{fontSize:16,fontWeight:900,color:'#0f172a'}}>Comunicados</div>
+            <button onClick={()=>setShowNotifs(false)} style={{background:'#f1f5f9',border:'none',borderRadius:8,padding:8,cursor:'pointer'}}><I n="x" s={16} c="#64748b"/></button>
+          </div>
+          <div style={{flex:1,overflowY:'auto',padding:16}}>
+            {notifications.length===0&&<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:20}}>Nenhum comunicado ainda.</div>}
+            {notifications.map(n=>{
+              const unread=!(n.read_by||[]).includes(user?.uid)
+              return(
+                <div key={n.id} onClick={async()=>{if(unread)await updateDoc(doc(db,'notifications',n.id),{read_by:[...(n.read_by||[]),user.uid]})}} style={{background:unread?'#fffbeb':'#f8fafc',border:`1px solid ${unread?'#fcd34d':'#e2e8f0'}`,borderRadius:12,padding:14,marginBottom:10,cursor:unread?'pointer':'default'}}>
+                  {unread&&<div style={{fontSize:9,fontWeight:700,color:'#d97706',marginBottom:4}}>NOVO</div>}
+                  <div style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:4}}>{n.title}</div>
+                  <div style={{fontSize:13,color:'#64748b',lineHeight:1.5,marginBottom:6}}>{n.message}</div>
+                  <div style={{fontSize:10,color:'#94a3b8'}}>De {n.from}</div>
+                </div>
+              )
+            })}
+          </div>
+        </div>}
         {toast&&<div style={{position:'absolute',bottom:20,left:'50%',transform:'translateX(-50%)',background:t.bg,border:`1px solid ${t.bo}`,borderRadius:12,padding:'12px 20px',zIndex:2000,fontSize:13,fontWeight:600,color:t.tx,boxShadow:'0 8px 32px rgba(0,0,0,0.12)',whiteSpace:'nowrap',animation:'su 0.3s ease'}}>{toast.msg}</div>}
       </div>
       <style>{`@keyframes su{from{opacity:0;transform:translateX(-50%) translateY(16px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}*{box-sizing:border-box}::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:#e2e8f0;border-radius:2px}input,select,textarea{color-scheme:light}`}</style>
