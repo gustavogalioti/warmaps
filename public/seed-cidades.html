@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>War Maps — Seed Cidades</title>
+<style>
+  body { font-family: system-ui; background: #0f172a; color: #e2e8f0; padding: 20px; margin: 0; }
+  h1 { color: #ef4444; margin-bottom: 4px; }
+  p { color: #94a3b8; font-size: 13px; margin-top: 0; }
+  input { width:100%;padding:12px;border-radius:10px;font-size:14px;margin-bottom:10px;box-sizing:border-box;background:#1e293b;color:#e2e8f0;border:1px solid #334155; }
+  .cidades { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+  .cidade-btn { padding:8px 16px; border-radius:20px; border:2px solid #334155; background:none; color:#94a3b8; font-size:13px; font-weight:700; cursor:pointer; transition:all 0.15s; }
+  .cidade-btn.active { border-color:#ef4444; background:#ef444422; color:#ef4444; }
+  button#btn { background:#ef4444; color:white; border:none; padding:14px; border-radius:12px; font-size:15px; font-weight:800; cursor:pointer; width:100%; margin-bottom:12px; }
+  button#btn:disabled { background:#374151; color:#6b7280; cursor:not-allowed; }
+  #progress { background:#1e293b; border-radius:8px; height:12px; margin:12px 0; overflow:hidden; }
+  #bar { background:linear-gradient(90deg,#ef4444,#f97316); height:100%; width:0%; transition:width 0.3s; border-radius:8px; }
+  #log { background:#1e293b; border-radius:12px; padding:16px; margin-top:12px; font-size:12px; font-family:monospace; max-height:50vh; overflow-y:auto; }
+  .ok { color:#22c55e; } .err { color:#ef4444; } .info { color:#60a5fa; } .head { color:#f97316; font-weight:700; margin-top:8px; }
+</style>
+</head>
+<body>
+<h1>⚔️ War Maps — Cidades</h1>
+<p>Adiciona bairros e pontos de Jundiaí, Campinas e Sorocaba.</p>
+
+<input id="email" type="email" placeholder="Seu email de ADM"/>
+<input id="senha" type="password" placeholder="Sua senha"/>
+
+<div style="font-size:12px;color:#64748b;margin-bottom:8px;font-weight:700;">SELECIONAR CIDADES:</div>
+<div class="cidades">
+  <div class="cidade-btn active" data-cidade="jundiai" onclick="toggleCidade(this)">📍 Jundiaí</div>
+  <div class="cidade-btn active" data-cidade="campinas" onclick="toggleCidade(this)">📍 Campinas</div>
+  <div class="cidade-btn active" data-cidade="sorocaba" onclick="toggleCidade(this)">📍 Sorocaba</div>
+</div>
+
+<div id="progress"><div id="bar"></div></div>
+<p id="status" style="color:#94a3b8;font-size:13px">Pronto para iniciar</p>
+<button id="btn" onclick="seed()">🚀 ADICIONAR BAIRROS</button>
+<div id="log"></div>
+
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js'
+import { getFirestore, collection, addDoc, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js'
+import { getAuth, signInWithEmailAndPassword } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js'
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDM-f0GLqTZjRmEbil33uVwSAAtqMtCeVc",
+  authDomain: "war-maps-5e8cf.firebaseapp.com",
+  projectId: "war-maps-5e8cf",
+  storageBucket: "war-maps-5e8cf.firebasestorage.app",
+  messagingSenderId: "233503419698",
+  appId: "1:233503419698:web:1b1d6dd3d8caf46d537b2b"
+}
+
+const app = initializeApp(firebaseConfig)
+const db = getFirestore(app)
+const auth = getAuth(app)
+
+const dados = {
+  jundiai: [
+    // Bairros
+    { name: "Centro — Jundiaí", lat: -23.1857, lng: -46.8869, type: "neighborhood" },
+    { name: "Vila Arens", lat: -23.1921, lng: -46.8801, type: "neighborhood" },
+    { name: "Vila Progresso", lat: -23.1771, lng: -46.8951, type: "neighborhood" },
+    { name: "Jardim Novo Horizonte", lat: -23.1701, lng: -46.8801, type: "neighborhood" },
+    { name: "Jardim Tamoio", lat: -23.2001, lng: -46.8901, type: "neighborhood" },
+    { name: "Vila Rio Branco", lat: -23.1951, lng: -46.8701, type: "neighborhood" },
+    { name: "Jardim São Camilo", lat: -23.1651, lng: -46.8751, type: "neighborhood" },
+    { name: "Vila das Hortências", lat: -23.2101, lng: -46.8651, type: "neighborhood" },
+    { name: "Jardim Colônia", lat: -23.2201, lng: -46.8801, type: "neighborhood" },
+    { name: "Anhangabaú", lat: -23.1801, lng: -46.9001, type: "neighborhood" },
+    { name: "Jardim Paulista — Jundiaí", lat: -23.1601, lng: -46.8651, type: "neighborhood" },
+    { name: "Vila Nambi", lat: -23.1951, lng: -46.9101, type: "neighborhood" },
+    { name: "Bairro Currupira", lat: -23.2101, lng: -46.9001, type: "neighborhood" },
+    { name: "Vila Municipal", lat: -23.1881, lng: -46.8821, type: "neighborhood" },
+    { name: "Jardim Caxambu", lat: -23.1501, lng: -46.8601, type: "neighborhood" },
+    // Landmarks
+    { name: "Parque da Cidade — Jundiaí", lat: -23.1871, lng: -46.9011, type: "landmark" },
+    { name: "Shopping Novo Mundo", lat: -23.1961, lng: -46.8851, type: "landmark" },
+    { name: "Estação Cultura Jundiaí", lat: -23.1861, lng: -46.8831, type: "landmark" },
+    { name: "Serra do Japi", lat: -23.2501, lng: -46.9501, type: "landmark" },
+    { name: "Autódromo de Jundiaí", lat: -23.1701, lng: -46.9201, type: "landmark" },
+    { name: "Parque Centenário — Jundiaí", lat: -23.1911, lng: -46.8891, type: "landmark" },
+    { name: "Vinícola União", lat: -23.1651, lng: -46.8951, type: "landmark" },
+  ],
+  campinas: [
+    // Bairros
+    { name: "Centro — Campinas", lat: -22.9056, lng: -47.0608, type: "neighborhood" },
+    { name: "Cambuí", lat: -22.8981, lng: -47.0541, type: "neighborhood" },
+    { name: "Jardim Guanabara", lat: -22.8851, lng: -47.0651, type: "neighborhood" },
+    { name: "Nova Campinas", lat: -22.8751, lng: -47.0801, type: "neighborhood" },
+    { name: "Taquaral", lat: -22.8801, lng: -47.0451, type: "neighborhood" },
+    { name: "Bosque", lat: -22.9001, lng: -47.0751, type: "neighborhood" },
+    { name: "Jardim Proença", lat: -22.9201, lng: -47.0451, type: "neighborhood" },
+    { name: "Vila Itapura", lat: -22.8951, lng: -47.0351, type: "neighborhood" },
+    { name: "Jardim Chapadão", lat: -22.8651, lng: -47.0451, type: "neighborhood" },
+    { name: "Parque Prado", lat: -22.9351, lng: -47.0651, type: "neighborhood" },
+    { name: "Chácara da Barra", lat: -22.8901, lng: -47.0901, type: "neighborhood" },
+    { name: "Vila União — Campinas", lat: -22.9151, lng: -47.0351, type: "neighborhood" },
+    { name: "Jardim das Paineiras", lat: -22.9401, lng: -47.0801, type: "neighborhood" },
+    { name: "Barão Geraldo", lat: -22.8201, lng: -47.0701, type: "neighborhood" },
+    { name: "Sousas", lat: -22.8501, lng: -46.9951, type: "neighborhood" },
+    // Landmarks
+    { name: "Parque Portugal (Lagoa do Taquaral)", lat: -22.8751, lng: -47.0451, type: "landmark" },
+    { name: "Shopping Iguatemi Campinas", lat: -22.8951, lng: -47.0641, type: "landmark" },
+    { name: "Estação Cultura Campinas", lat: -22.9061, lng: -47.0611, type: "landmark" },
+    { name: "UNICAMP", lat: -22.8175, lng: -47.0692, type: "landmark" },
+    { name: "PUC-Campinas", lat: -22.8901, lng: -47.0451, type: "landmark" },
+    { name: "Aeroporto de Viracopos", lat: -23.0074, lng: -47.1345, type: "landmark" },
+    { name: "Bosque dos Jequitibás", lat: -22.9051, lng: -47.0701, type: "landmark" },
+    { name: "Mercado Municipal — Campinas", lat: -22.9071, lng: -47.0591, type: "landmark" },
+  ],
+  sorocaba: [
+    // Bairros
+    { name: "Centro — Sorocaba", lat: -23.5015, lng: -47.4526, type: "neighborhood" },
+    { name: "Jardim Emília", lat: -23.4851, lng: -47.4401, type: "neighborhood" },
+    { name: "Vila Hortência", lat: -23.4951, lng: -47.4651, type: "neighborhood" },
+    { name: "Além Ponte", lat: -23.5101, lng: -47.4451, type: "neighborhood" },
+    { name: "Jardim Paulistano — Sorocaba", lat: -23.5201, lng: -47.4601, type: "neighborhood" },
+    { name: "Vila Barão", lat: -23.4901, lng: -47.4751, type: "neighborhood" },
+    { name: "Jardim Vergueiro", lat: -23.5151, lng: -47.4351, type: "neighborhood" },
+    { name: "Santa Rosália", lat: -23.4801, lng: -47.4551, type: "neighborhood" },
+    { name: "Jardim Três Marias", lat: -23.5301, lng: -47.4501, type: "neighborhood" },
+    { name: "Vila Helena", lat: -23.5051, lng: -47.4801, type: "neighborhood" },
+    { name: "Jardim Europa — Sorocaba", lat: -23.4751, lng: -47.4651, type: "neighborhood" },
+    { name: "Cajuru do Sul", lat: -23.5401, lng: -47.4651, type: "neighborhood" },
+    { name: "Jardim Ipanema — Sorocaba", lat: -23.4951, lng: -47.4301, type: "neighborhood" },
+    { name: "Vila São Carlos", lat: -23.5101, lng: -47.4701, type: "neighborhood" },
+    { name: "Campolim", lat: -23.4651, lng: -47.4451, type: "neighborhood" },
+    // Landmarks
+    { name: "Parque Chico Mendes", lat: -23.5001, lng: -47.4561, type: "landmark" },
+    { name: "Shopping Iguatemi Sorocaba", lat: -23.4881, lng: -47.4481, type: "landmark" },
+    { name: "Estádio Walter Ribeiro", lat: -23.5101, lng: -47.4601, type: "landmark" },
+    { name: "Zoológico de Sorocaba", lat: -23.5201, lng: -47.4751, type: "landmark" },
+    { name: "Parque Natural Corredores de Biodiversidade", lat: -23.4901, lng: -47.5001, type: "landmark" },
+    { name: "Catedral de Sorocaba", lat: -23.5021, lng: -47.4531, type: "landmark" },
+    { name: "Facens — Sorocaba", lat: -23.5151, lng: -47.4401, type: "landmark" },
+  ]
+}
+
+window.toggleCidade = function(el) {
+  el.classList.toggle('active')
+}
+
+window.seed = async function() {
+  const btn = document.getElementById('btn')
+  const log = document.getElementById('log')
+  const bar = document.getElementById('bar')
+  const status = document.getElementById('status')
+  const email = document.getElementById('email').value
+  const senha = document.getElementById('senha').value
+
+  if (!email || !senha) { alert('Preencha email e senha!'); return }
+
+  const selecionadas = [...document.querySelectorAll('.cidade-btn.active')].map(el => el.dataset.cidade)
+  if (selecionadas.length === 0) { alert('Selecione pelo menos uma cidade!'); return }
+
+  btn.disabled = true
+  log.innerHTML = ''
+
+  function addLog(msg, cls) {
+    log.innerHTML += `<div class="${cls}">${msg}</div>`
+    log.scrollTop = log.scrollHeight
+  }
+
+  try {
+    addLog('🔐 Autenticando...', 'info')
+    await signInWithEmailAndPassword(auth, email, senha)
+    addLog('✅ Autenticado com sucesso!', 'ok')
+  } catch(e) {
+    addLog(`❌ Erro: ${e.message}`, 'err')
+    btn.disabled = false
+    return
+  }
+
+  const todos = selecionadas.flatMap(c => dados[c])
+  let ok = 0
+
+  for (let i = 0; i < todos.length; i++) {
+    const b = todos[i]
+    // Cabeçalho de cidade
+    if (i === 0 || todos[i-1].name.split('—')[1]?.trim() !== b.name.split('—')[1]?.trim()) {
+      const cidade = b.name.includes('Jundiaí') ? '📍 JUNDIAÍ' : b.name.includes('Campinas') ? '📍 CAMPINAS' : b.name.includes('Sorocaba') ? '📍 SOROCABA' : ''
+      if (cidade) addLog(cidade, 'head')
+    }
+    try {
+      await addDoc(collection(db, 'conquest_points'), {
+        ...b,
+        owner_id: null, owner_name: null, clan_id: null,
+        last_checkin: null, checkin_count: 0,
+        created_at: serverTimestamp()
+      })
+      addLog(`✅ ${b.name}`, 'ok')
+      ok++
+    } catch(e) {
+      addLog(`❌ ${b.name}: ${e.message}`, 'err')
+    }
+    const pct = Math.round(((i+1)/todos.length)*100)
+    bar.style.width = pct + '%'
+    status.textContent = `${i+1}/${todos.length} — ${pct}%`
+  }
+
+  addLog(`\n🏁 Concluído: ${ok}/${todos.length} pontos adicionados!`, 'ok')
+  status.textContent = `✅ ${ok} pontos adicionados!`
+  btn.textContent = '✅ Concluído!'
+}
+</script>
+</body>
+</html>
