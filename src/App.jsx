@@ -11,12 +11,12 @@ import {
 } from 'firebase/firestore'
 
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: import.meta.env.VITE_FIREBASE_APP_ID
+  apiKey: "AIzaSyDM-f0GLqTZjRmEbil33uVwSAAtqMtCeVc",
+  authDomain: "war-maps-5e8cf.firebaseapp.com",
+  projectId: "war-maps-5e8cf",
+  storageBucket: "war-maps-5e8cf.firebasestorage.app",
+  messagingSenderId: "233503419698",
+  appId: "1:233503419698:web:1b1d6dd3d8caf46d537b2b"
 }
 
 const app = initializeApp(firebaseConfig)
