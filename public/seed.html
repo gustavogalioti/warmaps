@@ -1,1 +1,157 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>War Maps — Seed Bairros SP</title>
+<style>
+  body { font-family: system-ui; background: #0f172a; color: #e2e8f0; padding: 20px; margin: 0; }
+  h1 { color: #ef4444; }
+  button { background: #ef4444; color: white; border: none; padding: 14px 28px; border-radius: 12px; font-size: 16px; font-weight: 800; cursor: pointer; width: 100%; margin-bottom: 12px; }
+  button:disabled { background: #374151; color: #6b7280; cursor: not-allowed; }
+  #log { background: #1e293b; border-radius: 12px; padding: 16px; margin-top: 16px; font-size: 12px; font-family: monospace; max-height: 60vh; overflow-y: auto; }
+  .ok { color: #22c55e; }
+  .err { color: #ef4444; }
+  .info { color: #60a5fa; }
+  #progress { background: #1e293b; border-radius: 8px; height: 12px; margin: 12px 0; overflow: hidden; }
+  #bar { background: linear-gradient(90deg, #ef4444, #f97316); height: 100%; width: 0%; transition: width 0.3s; border-radius: 8px; }
+</style>
+</head>
+<body>
+<h1>⚔️ War Maps</h1>
+<p style="color:#94a3b8">Popula o Firestore com os 50 bairros e pontos turísticos mais famosos de São Paulo.</p>
+<div id="progress"><div id="bar"></div></div>
+<p id="status" style="color:#94a3b8;font-size:13px">Pronto para iniciar</p>
+<button id="btn" onclick="seed()">🚀 ADICIONAR 50 BAIRROS</button>
+<div id="log"></div>
 
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js'
+import { getFirestore, collection, addDoc, serverTimestamp, getDocs, query, where }
+  from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js'
+import { getAuth, signInAnonymously } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js'
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDM-f0GLqTZjRmEbil33uVwSAAtqMtCeVc",
+  authDomain: "war-maps-5e8cf.firebaseapp.com",
+  projectId: "war-maps-5e8cf",
+  storageBucket: "war-maps-5e8cf.firebasestorage.app",
+  messagingSenderId: "233503419698",
+  appId: "1:233503419698:web:1b1d6dd3d8caf46d537b2b"
+}
+
+const app = initializeApp(firebaseConfig)
+const db = getFirestore(app)
+const auth = getAuth(app)
+
+const bairros = [
+  // Centro
+  { name: "República", lat: -23.5431, lng: -46.6395, type: "neighborhood" },
+  { name: "Sé", lat: -23.5489, lng: -46.6388, type: "neighborhood" },
+  { name: "Bela Vista", lat: -23.5601, lng: -46.6441, type: "neighborhood" },
+  { name: "Liberdade", lat: -23.5601, lng: -46.6291, type: "neighborhood" },
+  { name: "Santa Cecília", lat: -23.5401, lng: -46.6561, type: "neighborhood" },
+  { name: "Consolação", lat: -23.5521, lng: -46.6601, type: "neighborhood" },
+  { name: "Higienópolis", lat: -23.5381, lng: -46.6611, type: "neighborhood" },
+  { name: "Bom Retiro", lat: -23.5271, lng: -46.6391, type: "neighborhood" },
+  // Zona Oeste
+  { name: "Pinheiros", lat: -23.5629, lng: -46.6863, type: "neighborhood" },
+  { name: "Vila Madalena", lat: -23.5561, lng: -46.6941, type: "neighborhood" },
+  { name: "Jardins", lat: -23.5711, lng: -46.6651, type: "neighborhood" },
+  { name: "Itaim Bibi", lat: -23.5851, lng: -46.6771, type: "neighborhood" },
+  { name: "Perdizes", lat: -23.5341, lng: -46.6741, type: "neighborhood" },
+  { name: "Lapa", lat: -23.5241, lng: -46.7041, type: "neighborhood" },
+  { name: "Alto de Pinheiros", lat: -23.5451, lng: -46.7191, type: "neighborhood" },
+  { name: "Butantã", lat: -23.5711, lng: -46.7281, type: "neighborhood" },
+  { name: "Morumbi", lat: -23.6091, lng: -46.7191, type: "neighborhood" },
+  // Zona Sul
+  { name: "Moema", lat: -23.6011, lng: -46.6641, type: "neighborhood" },
+  { name: "Vila Mariana", lat: -23.5881, lng: -46.6371, type: "neighborhood" },
+  { name: "Saúde", lat: -23.6121, lng: -46.6271, type: "neighborhood" },
+  { name: "Campo Belo", lat: -23.6201, lng: -46.6791, type: "neighborhood" },
+  { name: "Brooklin", lat: -23.6211, lng: -46.6961, type: "neighborhood" },
+  { name: "Santo Amaro", lat: -23.6521, lng: -46.7051, type: "neighborhood" },
+  { name: "Interlagos", lat: -23.7011, lng: -46.6981, type: "neighborhood" },
+  // Zona Norte
+  { name: "Santana", lat: -23.5011, lng: -46.6271, type: "neighborhood" },
+  { name: "Tucuruvi", lat: -23.4721, lng: -46.6081, type: "neighborhood" },
+  { name: "Vila Guilherme", lat: -23.5081, lng: -46.5981, type: "neighborhood" },
+  { name: "Casa Verde", lat: -23.5051, lng: -46.6601, type: "neighborhood" },
+  { name: "Mandaqui", lat: -23.4851, lng: -46.6341, type: "neighborhood" },
+  // Zona Leste
+  { name: "Tatuapé", lat: -23.5401, lng: -46.5741, type: "neighborhood" },
+  { name: "Mooca", lat: -23.5531, lng: -46.5981, type: "neighborhood" },
+  { name: "Penha", lat: -23.5201, lng: -46.5331, type: "neighborhood" },
+  { name: "Itaquera", lat: -23.5381, lng: -46.4551, type: "neighborhood" },
+  { name: "Vila Formosa", lat: -23.5581, lng: -46.5461, type: "neighborhood" },
+  { name: "Aricanduva", lat: -23.5291, lng: -46.5271, type: "neighborhood" },
+  { name: "Belém", lat: -23.5451, lng: -46.5791, type: "neighborhood" },
+  { name: "Brás", lat: -23.5441, lng: -46.6101, type: "neighborhood" },
+  // Landmarks
+  { name: "Av. Paulista", lat: -23.5631, lng: -46.6541, type: "landmark" },
+  { name: "Parque Ibirapuera", lat: -23.5874, lng: -46.6576, type: "landmark" },
+  { name: "Pinacoteca", lat: -23.5341, lng: -46.6331, type: "landmark" },
+  { name: "MASP", lat: -23.5613, lng: -46.6558, type: "landmark" },
+  { name: "Mercadão Municipal", lat: -23.5421, lng: -46.6271, type: "landmark" },
+  { name: "Catedral da Sé", lat: -23.5503, lng: -46.6342, type: "landmark" },
+  { name: "Museu do Ipiranga", lat: -23.5851, lng: -46.6071, type: "landmark" },
+  { name: "Parque Trianon", lat: -23.5631, lng: -46.6601, type: "landmark" },
+  { name: "Shopping Iguatemi", lat: -23.5721, lng: -46.6841, type: "landmark" },
+  { name: "Arena Corinthians", lat: -23.5451, lng: -46.4741, type: "landmark" },
+  { name: "Allianz Parque", lat: -23.5271, lng: -46.6791, type: "landmark" },
+  { name: "MorumBIS", lat: -23.6001, lng: -46.7191, type: "landmark" },
+  { name: "Autódromo de Interlagos", lat: -23.7036, lng: -46.6997, type: "landmark" },
+  { name: "Sambódromo do Anhembi", lat: -23.5161, lng: -46.6301, type: "landmark" },
+]
+
+window.seed = async function() {
+  const btn = document.getElementById('btn')
+  const log = document.getElementById('log')
+  const bar = document.getElementById('bar')
+  const status = document.getElementById('status')
+  btn.disabled = true
+  log.innerHTML = ''
+
+  function addLog(msg, cls) {
+    log.innerHTML += `<div class="${cls}">${msg}</div>`
+    log.scrollTop = log.scrollHeight
+  }
+
+  try {
+    addLog('🔐 Autenticando...', 'info')
+    await signInAnonymously(auth)
+    addLog('✅ Autenticado!', 'ok')
+  } catch(e) {
+    addLog(`❌ Erro de autenticação: ${e.message}`, 'err')
+    addLog('⚠️ Abra este arquivo dentro do app War Maps ou use seu login normal.', 'err')
+    btn.disabled = false
+    return
+  }
+
+  let ok = 0
+  for (let i = 0; i < bairros.length; i++) {
+    const b = bairros[i]
+    try {
+      await addDoc(collection(db, 'conquest_points'), {
+        ...b,
+        owner_id: null, owner_name: null, clan_id: null,
+        last_checkin: null, checkin_count: 0,
+        created_at: serverTimestamp()
+      })
+      addLog(`✅ ${b.name}`, 'ok')
+      ok++
+    } catch(e) {
+      addLog(`❌ ${b.name}: ${e.message}`, 'err')
+    }
+    const pct = Math.round(((i+1)/bairros.length)*100)
+    bar.style.width = pct + '%'
+    status.textContent = `${i+1}/${bairros.length} — ${pct}%`
+  }
+
+  addLog(`\n🏁 Concluído: ${ok}/${bairros.length} bairros adicionados!`, 'ok')
+  status.textContent = `✅ ${ok} bairros adicionados com sucesso!`
+  btn.textContent = '✅ Concluído!'
+}
+</script>
+</body>
+</html>
