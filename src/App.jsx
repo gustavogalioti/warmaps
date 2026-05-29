@@ -1507,6 +1507,7 @@ export default function App(){
         </div>}
 
         {tab==='forum'&&<div style={{height:'100%',display:'flex',flexDirection:'column'}}><ForumView user={user}/></div>}
+        {tab==='conquistas'&&<AchievementsView user={user} points={points}/>}
         {tab==='profile'&&<ProfileView user={user} points={points} onUpdate={u=>{setUser(u);setProfiles(p=>({...p,[u.uid]:u}))}}/>}
         {tab==='admin'&&user?.is_admin&&<AdminView user={user} points={points}/>}
 
