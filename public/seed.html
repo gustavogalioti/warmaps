@@ -22,14 +22,14 @@
 <p style="color:#94a3b8">Popula o Firestore com os 50 bairros e pontos turísticos mais famosos de São Paulo.</p>
 <div id="progress"><div id="bar"></div></div>
 <p id="status" style="color:#94a3b8;font-size:13px">Pronto para iniciar</p>
-<button id="btn" onclick="seed()">🚀 ADICIONAR 50 BAIRROS</button>
+<input id="email" type="email" placeholder="Seu email de ADM" style="width:100%;padding:12px;border-radius:10px;font-size:15px;margin-bottom:10px;box-sizing:border-box;background:#1e293b;color:#e2e8f0;border:1px solid #334155"/><input id="senha" type="password" placeholder="Sua senha" style="width:100%;padding:12px;border-radius:10px;font-size:15px;margin-bottom:12px;box-sizing:border-box;background:#1e293b;color:#e2e8f0;border:1px solid #334155"/><button id="btn" onclick="seed()">ADICIONAR 50 BAIRROS</button>
 <div id="log"></div>
 
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js'
 import { getFirestore, collection, addDoc, serverTimestamp, getDocs, query, where }
   from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js'
-import { getAuth, signInAnonymously } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js'
+import { getAuth, signInWithEmailAndPassword } from 'https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js'
 
 const firebaseConfig = {
   apiKey: "AIzaSyDM-f0GLqTZjRmEbil33uVwSAAtqMtCeVc",
@@ -119,7 +119,7 @@ window.seed = async function() {
 
   try {
     addLog('🔐 Autenticando...', 'info')
-    await signInAnonymously(auth)
+    const email = document.getElementById('email').value; const senha = document.getElementById('senha').value; await signInWithEmailAndPassword(auth, email, senha)
     addLog('✅ Autenticado!', 'ok')
   } catch(e) {
     addLog(`❌ Erro de autenticação: ${e.message}`, 'err')
