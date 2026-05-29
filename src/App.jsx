@@ -20,6 +20,99 @@ const TC={QUARTEIRAO:'#4f46e5',BAIRRO:'#d97706',AREA:'#059669',CIDADE:'#dc2626'}
 const TB={QUARTEIRAO:'#eef2ff',BAIRRO:'#fffbeb',AREA:'#ecfdf5',CIDADE:'#fef2f2'}
 const TL={QUARTEIRAO:'QUARTEIRÃO',BAIRRO:'BAIRRO',AREA:'ÁREA',CIDADE:'CIDADE'}
 
+// ── Level System ──────────────────────────────────────────────
+function calcLevel(km) {
+  if (km < 10) return Math.max(1, Math.floor(km) + 1)      // L1-10: 1km each
+  if (km < 10 + 10*20) return 10 + Math.floor((km - 10) / 20)   // L11-20: 20km each
+  const base = 10 + 200
+  if (km < base + 10*30) return 20 + Math.floor((km - base) / 30) // L21-30: 30km each
+  const base2 = base + 300
+  if (km < base2 + 10*40) return 30 + Math.floor((km - base2) / 40)
+  const base3 = base2 + 400
+  if (km < base3 + 10*50) return 40 + Math.floor((km - base3) / 50)
+  const base4 = base3 + 500
+  if (km < base4 + 10*60) return 50 + Math.floor((km - base4) / 60)
+  const base5 = base4 + 600
+  if (km < base5 + 10*70) return 60 + Math.floor((km - base5) / 70)
+  const base6 = base5 + 700
+  if (km < base6 + 10*80) return 70 + Math.floor((km - base6) / 80)
+  const base7 = base6 + 800
+  if (km < base7 + 10*90) return 80 + Math.floor((km - base7) / 90)
+  const base8 = base7 + 900
+  return Math.min(100, 90 + Math.floor((km - base8) / 90))
+}
+
+function kmForLevel(lvl) {
+  if (lvl <= 1) return 0
+  if (lvl <= 10) return lvl - 1
+  if (lvl <= 20) return 10 + (lvl - 10) * 20
+  if (lvl <= 30) return 10 + 200 + (lvl - 20) * 30
+  if (lvl <= 40) return 10 + 200 + 300 + (lvl - 30) * 40
+  if (lvl <= 50) return 10 + 200 + 300 + 400 + (lvl - 40) * 50
+  if (lvl <= 60) return 10 + 200 + 300 + 400 + 500 + (lvl - 50) * 60
+  if (lvl <= 70) return 10 + 200 + 300 + 400 + 500 + 600 + (lvl - 60) * 70
+  if (lvl <= 80) return 10 + 200 + 300 + 400 + 500 + 600 + 700 + (lvl - 70) * 80
+  if (lvl <= 90) return 10 + 200 + 300 + 400 + 500 + 600 + 700 + 800 + (lvl - 80) * 90
+  return 10 + 200 + 300 + 400 + 500 + 600 + 700 + 800 + 900 + (lvl - 90) * 90
+}
+
+function levelPointsBonus(lvl) { return lvl * 100 }
+
+const LEVEL_EMBLEMS = {
+  1:'🥚',2:'🐣',3:'🐥',4:'🐓',5:'🦅',
+  10:'⚔️',15:'🛡️',20:'🏹',25:'🗡️',30:'👑',
+  35:'💎',40:'🔱',45:'🌟',50:'🌠',60:'🔥',
+  70:'⚡',80:'🌊',90:'💀',100:'🏆',
+}
+function getLevelEmblem(lvl) {
+  const keys = Object.keys(LEVEL_EMBLEMS).map(Number).sort((a,b)=>b-a)
+  for (const k of keys) { if (lvl >= k) return LEVEL_EMBLEMS[k] }
+  return '🥚'
+}
+function getLevelTitle(lvl) {
+  if (lvl < 5)  return 'Iniciante'
+  if (lvl < 10) return 'Explorador'
+  if (lvl < 20) return 'Guerreiro'
+  if (lvl < 30) return 'Veterano'
+  if (lvl < 40) return 'Elite'
+  if (lvl < 50) return 'Mestre'
+  if (lvl < 60) return 'Grão-Mestre'
+  if (lvl < 70) return 'Lendário'
+  if (lvl < 80) return 'Mítico'
+  if (lvl < 90) return 'Imortal'
+  return 'Supremo'
+}
+
+// ── Challenges / Conquistas ────────────────────────────────────
+const CHALLENGES = [
+  // KM challenges
+  {id:'km_1',   name:'Primeiros Passos',   desc:'Acumule 1 km',         icon:'👟', pts:100,  check:(u)=>(u.km_total||0)>=1},
+  {id:'km_10',  name:'Maratonista',        desc:'Acumule 10 km',        icon:'🏃', pts:200,  check:(u)=>(u.km_total||0)>=10},
+  {id:'km_50',  name:'Ultra Runner',       desc:'Acumule 50 km',        icon:'🦅', pts:500,  check:(u)=>(u.km_total||0)>=50},
+  {id:'km_100', name:'Centurião',          desc:'Acumule 100 km',       icon:'⚔️', pts:1000, check:(u)=>(u.km_total||0)>=100},
+  {id:'km_500', name:'Lenda das Ruas',     desc:'Acumule 500 km',       icon:'🏆', pts:5000, check:(u)=>(u.km_total||0)>=500},
+  // Territory challenges
+  {id:'ter_1',  name:'Meu Território',     desc:'Conquiste 1 bairro',   icon:'🏴', pts:100,  check:(u,pts)=>pts.filter(p=>p.owner_id===u.uid).length>=1},
+  {id:'ter_5',  name:'Expansionista',      desc:'Conquiste 5 bairros',  icon:'🗺️', pts:300,  check:(u,pts)=>pts.filter(p=>p.owner_id===u.uid).length>=5},
+  {id:'ter_10', name:'Dominador',          desc:'Conquiste 10 bairros', icon:'👑', pts:700,  check:(u,pts)=>pts.filter(p=>p.owner_id===u.uid).length>=10},
+  {id:'ter_20', name:'Imperador',          desc:'Conquiste 20 bairros', icon:'🔱', pts:2000, check:(u,pts)=>pts.filter(p=>p.owner_id===u.uid).length>=20},
+  // Level challenges
+  {id:'lvl_5',  name:'Guerreiro Nível 5',  desc:'Alcance o nível 5',    icon:'🐓', pts:200,  check:(u)=>calcLevel(u.km_total||0)>=5},
+  {id:'lvl_10', name:'Veterano',           desc:'Alcance o nível 10',   icon:'🛡️', pts:500,  check:(u)=>calcLevel(u.km_total||0)>=10},
+  {id:'lvl_20', name:'Elite da Guerra',    desc:'Alcance o nível 20',   icon:'🏹', pts:1000, check:(u)=>calcLevel(u.km_total||0)>=20},
+  {id:'lvl_50', name:'Mestre Supremo',     desc:'Alcance o nível 50',   icon:'🌟', pts:5000, check:(u)=>calcLevel(u.km_total||0)>=50},
+  // Battle challenges
+  {id:'bat_1',  name:'Primeira Batalha',   desc:'Inicie 1 batalha',     icon:'⚔️', pts:150,  check:(u)=>(u.battles_started||0)>=1},
+  {id:'bat_5',  name:'Combatente',         desc:'Inicie 5 batalhas',    icon:'🗡️', pts:400,  check:(u)=>(u.battles_started||0)>=5},
+  {id:'bat_w1', name:'Primeira Vitória',   desc:'Vença 1 batalha',      icon:'🥇', pts:300,  check:(u)=>(u.battles_won||0)>=1},
+  {id:'bat_w5', name:'Invicto',            desc:'Vença 5 batalhas',     icon:'💎', pts:1000, check:(u)=>(u.battles_won||0)>=5},
+  // Checkin challenges
+  {id:'chk_1',  name:'Bem-vindo',          desc:'Faça seu 1º check-in', icon:'📍', pts:50,   check:(u)=>(u.checkins||0)>=1},
+  {id:'chk_10', name:'Explorador Urbano',  desc:'Faça 10 check-ins',    icon:'🗺️', pts:200,  check:(u)=>(u.checkins||0)>=10},
+  {id:'chk_50', name:'Andarilho',          desc:'Faça 50 check-ins',    icon:'🧭', pts:800,  check:(u)=>(u.checkins||0)>=50},
+]
+
+
 // ── Imgur upload ──────────────────────────────────────────────
 const IMGUR_CLIENT_ID = '546c25a59c58ad7' // public anonymous key
 async function uploadToImgur(file) {
@@ -59,6 +152,7 @@ const I=({n,s=18,c='currentColor'})=>{
     msg:<><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></>,
     send:<><line x1="22"y1="2"x2="11"y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></>,
     zap:<><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></>,
+    star:<><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></>,
     refresh:<><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></>,
     locate:<><circle cx="12"cy="12"r="3"/><path d="M22 12h-4M6 12H2M12 6V2M12 22v-4"/></>,
   }
@@ -291,6 +385,7 @@ const Checkin=({point,geo,user,onResult})=>{
     setLoading(true)
     try{
       await addDoc(collection(db,'checkins'),{user_id:user.uid,point_id:point.id,lat:geo.lat,lng:geo.lng,dist_m:dist,created_at:serverTimestamp()})
+      await updateDoc(doc(db,'profiles',user.uid),{checkins:(user.checkins||0)+1})
       if(!point.owner_id){
         await updateDoc(doc(db,'conquest_points',point.id),{owner_id:user.uid,owner_name:user.display_name,owner_color:user.avatar_color,owner_km:user.km_total||0,conquered_at:serverTimestamp()})
         await updateDoc(doc(db,'profiles',user.uid),{points:(user.points||0)+100})
@@ -488,8 +583,9 @@ const ProfileView=({user,points,onUpdate})=>{
           </div>
         )}
 
+        <div style={{marginBottom:16}}><LevelBar km={user.km_total||0}/></div>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:20}}>
-          {[['🏃',`${user.km_total||0}km`,'KMs'],['⚑',myPoints.length,'Territórios'],['⭐',user.points||0,'Pontos']].map(([ic,v,l])=>(
+          {[['🏃',`${(user.km_total||0).toFixed(1)}km`,'KMs'],['⚑',myPoints.length,'Territórios'],['⭐',user.points||0,'Pontos']].map(([ic,v,l])=>(
             <div key={l} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:'14px 10px',textAlign:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
               <div style={{fontSize:20,marginBottom:4}}>{ic}</div>
               <div style={{fontSize:18,fontWeight:900,color:'#4f46e5'}}>{v}</div>
@@ -766,6 +862,110 @@ const NotifHistory=()=>{
   </div>)
 }
 
+
+
+// ── Level Bar Component ───────────────────────────────────────
+const LevelBar=({km,size='normal'})=>{
+  const lvl=calcLevel(km||0)
+  const cur=kmForLevel(lvl)
+  const next=kmForLevel(lvl+1)
+  const pct=lvl>=100?100:Math.min(100,((km-cur)/(next-cur))*100)
+  const emblem=getLevelEmblem(lvl)
+  const title=getLevelTitle(lvl)
+  if(size==='small')return(
+    <div style={{display:'flex',alignItems:'center',gap:6}}>
+      <span style={{fontSize:16}}>{emblem}</span>
+      <div>
+        <div style={{fontSize:10,fontWeight:700,color:'#4f46e5'}}>Nv.{lvl} · {title}</div>
+        <div style={{height:3,width:60,background:'#e2e8f0',borderRadius:2,overflow:'hidden'}}>
+          <div style={{height:'100%',width:pct+'%',background:'#4f46e5',borderRadius:2}}/>
+        </div>
+      </div>
+    </div>
+  )
+  return(
+    <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:'14px 16px',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
+      <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:10}}>
+        <div style={{fontSize:36}}>{emblem}</div>
+        <div>
+          <div style={{fontSize:11,fontWeight:700,color:'#94a3b8',letterSpacing:1}}>NÍVEL</div>
+          <div style={{fontSize:28,fontWeight:900,color:'#4f46e5',lineHeight:1}}>{lvl}</div>
+          <div style={{fontSize:12,color:'#64748b',fontWeight:600}}>{title}</div>
+        </div>
+        {lvl<100&&<div style={{marginLeft:'auto',textAlign:'right'}}>
+          <div style={{fontSize:10,color:'#94a3b8'}}>próximo nível</div>
+          <div style={{fontSize:12,fontWeight:700,color:'#0f172a'}}>{(next-(km||0)).toFixed(1)} km</div>
+        </div>}
+      </div>
+      <div style={{height:8,background:'#f1f5f9',borderRadius:4,overflow:'hidden',marginBottom:6}}>
+        <div style={{height:'100%',width:pct+'%',background:'linear-gradient(90deg,#4f46e5,#7c3aed)',borderRadius:4,transition:'width 0.5s'}}/>
+      </div>
+      <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:'#94a3b8'}}>
+        <span>{(km||0).toFixed(1)} km</span>
+        {lvl<100&&<span>{next} km</span>}
+      </div>
+    </div>
+  )
+}
+
+// ── Achievements View ─────────────────────────────────────────
+const AchievementsView=({user,points})=>{
+  const done=user.achievements||[]
+  const lvl=calcLevel(user.km_total||0)
+  const emblems=user.emblems||[]
+  return(
+    <div style={{overflowY:'auto',height:'100%',background:'#f8fafc',padding:20}}>
+      <div style={{marginBottom:16}}>
+        <div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:4}}>PROGRESSO</div>
+        <div style={{fontSize:22,fontWeight:900,color:'#0f172a',marginBottom:12}}>Conquistas</div>
+        <LevelBar km={user.km_total||0}/>
+      </div>
+
+      {/* Emblems row */}
+      {emblems.length>0&&<div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:14,marginBottom:16,boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
+        <div style={{fontSize:12,fontWeight:700,color:'#64748b',marginBottom:10}}>EMBLEMAS DE NÍVEL</div>
+        <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+          {emblems.map((e,i)=>(
+            <div key={i} style={{width:40,height:40,borderRadius:12,background:'linear-gradient(135deg,#eef2ff,#e0e7ff)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,border:'1px solid #c7d2fe'}}>{e}</div>
+          ))}
+        </div>
+      </div>}
+
+      {/* Challenges */}
+      <div style={{fontSize:12,fontWeight:700,color:'#64748b',marginBottom:10}}>DESAFIOS ({done.length}/{CHALLENGES.length})</div>
+      {CHALLENGES.map(c=>{
+        const isDone=done.includes(c.id)
+        let progress=''
+        try{
+          if(c.id.startsWith('km_')){const need=parseFloat(c.id.split('_')[1]);progress=`${Math.min(need,(user.km_total||0)).toFixed(1)}/${need} km`}
+          else if(c.id.startsWith('ter_')){const need=parseInt(c.id.split('_')[1]);const have=points.filter(p=>p.owner_id===user.uid).length;progress=`${Math.min(need,have)}/${need} bairros`}
+          else if(c.id.startsWith('lvl_')){const need=parseInt(c.id.split('_')[1]);progress=`Nv.${lvl}/${need}`}
+          else if(c.id.startsWith('chk_')){const need=parseInt(c.id.split('_')[1]);progress=`${Math.min(need,user.checkins||0)}/${need}`}
+          else if(c.id.startsWith('bat_')){const field=c.id.includes('_w')?'battles_won':'battles_started';const need=parseInt(c.id.split(/[_w]+/).pop());progress=`${Math.min(need,user[field]||0)}/${need}`}
+        }catch{}
+        return(
+          <div key={c.id} style={{background:isDone?'#f0fdf4':'#fff',border:`1px solid ${isDone?'#86efac':'#e2e8f0'}`,borderRadius:14,padding:14,marginBottom:10,display:'flex',gap:12,alignItems:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.04)',opacity:isDone?1:0.85}}>
+            <div style={{width:48,height:48,borderRadius:14,background:isDone?'linear-gradient(135deg,#f0fdf4,#dcfce7)':'#f8fafc',display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,border:`1px solid ${isDone?'#86efac':'#e2e8f0'}`,flexShrink:0}}>
+              {isDone?c.icon:<span style={{filter:'grayscale(1)',opacity:0.4}}>{c.icon}</span>}
+            </div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:2}}>
+                <span style={{fontSize:14,fontWeight:700,color:isDone?'#166534':'#0f172a'}}>{c.name}</span>
+                {isDone&&<span style={{fontSize:10,fontWeight:700,color:'#059669',background:'#dcfce7',padding:'2px 6px',borderRadius:20}}>✓ Concluído</span>}
+              </div>
+              <div style={{fontSize:12,color:'#64748b',marginBottom:4}}>{c.desc}</div>
+              {!isDone&&progress&&<div style={{fontSize:11,color:'#94a3b8',fontFamily:'monospace'}}>{progress}</div>}
+            </div>
+            <div style={{textAlign:'right',flexShrink:0}}>
+              <div style={{fontSize:14,fontWeight:900,color:isDone?'#059669':'#94a3b8'}}>+{c.pts}</div>
+              <div style={{fontSize:9,color:'#94a3b8',fontWeight:600}}>PTS</div>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
 // ── Admin View ────────────────────────────────────────────────
 const AdminView=({user,points})=>{
@@ -1088,8 +1288,37 @@ export default function App(){
     if(!user||km<=0)return
     try{
       const newTotal=parseFloat(((user.km_total||0)+km).toFixed(3))
-      await updateDoc(doc(db,'profiles',user.uid),{km_total:newTotal})
-      setUser(u=>({...u,km_total:newTotal}))
+      const oldLevel=calcLevel(user.km_total||0)
+      const newLevel=calcLevel(newTotal)
+      const updates={km_total:newTotal}
+      // Level up!
+      if(newLevel>oldLevel){
+        const bonus=levelPointsBonus(newLevel)
+        updates.level=newLevel
+        updates.points=(user.points||0)+bonus
+        updates.emblems=[...(user.emblems||[]),getLevelEmblem(newLevel)].filter((v,i,a)=>a.indexOf(v)===i)
+        toast$(`${getLevelEmblem(newLevel)} Nível ${newLevel}! +${bonus} pts — ${getLevelTitle(newLevel)}`,'ok')
+      }
+      await updateDoc(doc(db,'profiles',user.uid),updates)
+      setUser(u=>({...u,...updates}))
+      // Check challenges
+      const updatedUser={...user,...updates}
+      const allPts=points
+      const completed=CHALLENGES.filter(c=>{
+        const alreadyDone=(user.achievements||[]).includes(c.id)
+        if(alreadyDone)return false
+        try{return c.check(updatedUser,allPts)}catch{return false}
+      })
+      for(const c of completed){
+        const achUpdates={
+          achievements:[...(updatedUser.achievements||[]),c.id],
+          points:(updatedUser.points||0)+c.pts,
+        }
+        await updateDoc(doc(db,'profiles',user.uid),achUpdates)
+        setUser(u=>({...u,...achUpdates}))
+        toast$(`${c.icon} Conquista: ${c.name}! +${c.pts} pts`,'ok')
+        await new Promise(r=>setTimeout(r,2000)) // stagger toasts
+      }
       // Also update owner_km on territories this user owns
       const myPoints=points.filter(p=>p.owner_id===user.uid)
       if(myPoints.length>0){
@@ -1144,6 +1373,7 @@ export default function App(){
     {id:'nearby',n:'pin',l:'Perto',b:nearby.length},
     {id:'battles',n:'sword',l:'Batalhas',b:battles.length},
     {id:'ranking',n:'trophy',l:'Ranking'},
+    {id:'conquistas',n:'star',l:'Conquistas'},
     {id:'forum',n:'forum',l:'Fórum'},
     {id:'profile',n:'user',l:'Perfil'},
     ...(user?.is_admin?[{id:'admin',n:'settings',l:'ADM'}]:[]),
@@ -1180,9 +1410,10 @@ export default function App(){
         {tab==='map'&&<>
           {leaflet?<LeafletMap points={points} geo={geo} profiles={profiles} selectedId={selected?.id} battles={battles} addMode={addMode} onSelect={setSelected} onMapClick={({lat,lng})=>{setEditingPoint({lat,lng});setAddMode(false)}}/>:<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',color:'#94a3b8'}}>Carregando mapa...</div>}
           <GeoBar geo={geo}/>
-          {user&&(user.km_total||0)>0&&<div style={{position:'absolute',bottom:56,left:'50%',transform:'translateX(-50%)',background:'rgba(79,70,229,0.9)',color:'#fff',borderRadius:20,padding:'5px 14px',fontSize:12,fontWeight:700,zIndex:1000,whiteSpace:'nowrap'}}>
-            🏃 {(user.km_total||0).toFixed(2)} km acumulados
-          </div>}
+          <div style={{position:'absolute',bottom:56,left:'50%',transform:'translateX(-50%)',background:'rgba(79,70,229,0.9)',color:'#fff',borderRadius:20,padding:'5px 16px',fontSize:12,fontWeight:700,zIndex:1000,whiteSpace:'nowrap',display:'flex',alignItems:'center',gap:8}}>
+            <span>{getLevelEmblem(calcLevel(user.km_total||0))}</span>
+            <span>Nv.{calcLevel(user.km_total||0)} · {(user.km_total||0).toFixed(2)} km</span>
+          </div>
           <NeighborhoodLoader loading={loadingNeighborhoods} status={neighborhoodStatus} count={points.length} geo={geo} onManualSync={()=>geo.lat&&syncArea(geo.lat,geo.lng,true)}/>
           {user.is_admin&&<div style={{position:'absolute',top:16,left:16,display:'flex',gap:8,zIndex:1000}}>
             <button onClick={()=>{setAddMode(!addMode);setEditingPoint(null)}} style={{background:addMode?'#4f46e5':'#fff',border:`2px solid ${addMode?'#4f46e5':'#e2e8f0'}`,borderRadius:12,color:addMode?'#fff':'#64748b',cursor:'pointer',padding:'9px 16px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:700,boxShadow:'0 2px 8px rgba(0,0,0,0.1)'}}>
@@ -1264,7 +1495,11 @@ export default function App(){
               <div style={{width:44,height:44,borderRadius:'50%',overflow:'hidden',flexShrink:0}}>
                 {u.photo_url?<img src={u.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',background:u.avatar_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:19,color:'#fff'}}>{u.display_name?.charAt(0)||'?'}</div>}
               </div>
-              <div style={{flex:1}}><div style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{u.display_name}</div><div style={{fontSize:11,color:'#64748b'}}>{u.km_total||0} km · {points.filter(p=>p.owner_id===id).length} territórios{u.city?` · ${u.city}`:''}</div></div>
+              <div style={{flex:1}}>
+                <div style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{u.display_name}</div>
+                <div style={{fontSize:11,color:'#64748b'}}>{(u.km_total||0).toFixed(1)} km · {points.filter(p=>p.owner_id===id).length} territórios</div>
+                <LevelBar km={u.km_total||0} size="small"/>
+              </div>
               <div style={{textAlign:'right'}}><div style={{fontSize:20,fontWeight:900,color:'#4f46e5'}}>{u.points||0}</div><div style={{fontSize:10,color:'#94a3b8',fontWeight:600}}>pts</div></div>
             </div>
           ))}
