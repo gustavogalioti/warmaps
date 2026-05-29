@@ -1,1539 +1,1439 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { initializeApp } from 'firebase/app'
 import {
-  auth, db,
-  createUserWithEmailAndPassword,
-  signInWithEmailAndPassword,
-  onAuthStateChanged,
-  collection, doc, getDoc, getDocs, setDoc, addDoc, updateDoc, deleteDoc,
-  onSnapshot, query, where, orderBy, serverTimestamp,
-} from './firebase.js'
-import { fetchNeighborhoodsByLocation } from './neighborhoods.js'
+  getAuth, onAuthStateChanged, createUserWithEmailAndPassword,
+  signInWithEmailAndPassword, signOut
+} from 'firebase/auth'
+import {
+  getFirestore, collection, doc, getDoc, getDocs, setDoc, addDoc,
+  updateDoc, deleteDoc, query, where, orderBy, limit, onSnapshot,
+  serverTimestamp, increment, writeBatch, Timestamp
+} from 'firebase/firestore'
+import { MapContainer, TileLayer, Marker, Popup, Circle, useMapEvents, ZoomControl } from 'react-leaflet'
+import L from 'leaflet'
+import 'leaflet/dist/leaflet.css'
 
-// ── helpers ───────────────────────────────────────────────────
-const hav=(a,b,c,d)=>{const R=6371000,x=(c-a)*Math.PI/180,y=(d-b)*Math.PI/180,s=Math.sin(x/2)**2+Math.cos(a*Math.PI/180)*Math.cos(c*Math.PI/180)*Math.sin(y/2)**2;return R*2*Math.atan2(Math.sqrt(s),Math.sqrt(1-s))}
-const fmtD=m=>m<1000?`${Math.round(m)}m`:`${(m/1000).toFixed(1)}km`
-const fmtT=ms=>{const h=Math.floor(ms/3600000),m=Math.floor((ms%3600000)/60000);return `${h}h ${m}m`}
-const fmtDate=ts=>{if(!ts)return '';const d=ts.toDate?ts.toDate():new Date(ts);return d.toLocaleDateString('pt-BR',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'})}
-const COLORS=['#4f46e5','#d97706','#059669','#dc2626','#7c3aed','#0284c7','#be185d','#0891b2','#65a30d']
-const rndColor=()=>COLORS[Math.floor(Math.random()*COLORS.length)]
-const TC={QUARTEIRAO:'#4f46e5',BAIRRO:'#d97706',AREA:'#059669',CIDADE:'#dc2626'}
-const TB={QUARTEIRAO:'#eef2ff',BAIRRO:'#fffbeb',AREA:'#ecfdf5',CIDADE:'#fef2f2'}
-const TL={QUARTEIRAO:'QUARTEIRÃO',BAIRRO:'BAIRRO',AREA:'ÁREA',CIDADE:'CIDADE'}
-
-// ── Level System ──────────────────────────────────────────────
-function calcLevel(km) {
-  if (km < 10) return Math.max(1, Math.floor(km) + 1)      // L1-10: 1km each
-  if (km < 10 + 10*20) return 10 + Math.floor((km - 10) / 20)   // L11-20: 20km each
-  const base = 10 + 200
-  if (km < base + 10*30) return 20 + Math.floor((km - base) / 30) // L21-30: 30km each
-  const base2 = base + 300
-  if (km < base2 + 10*40) return 30 + Math.floor((km - base2) / 40)
-  const base3 = base2 + 400
-  if (km < base3 + 10*50) return 40 + Math.floor((km - base3) / 50)
-  const base4 = base3 + 500
-  if (km < base4 + 10*60) return 50 + Math.floor((km - base4) / 60)
-  const base5 = base4 + 600
-  if (km < base5 + 10*70) return 60 + Math.floor((km - base5) / 70)
-  const base6 = base5 + 700
-  if (km < base6 + 10*80) return 70 + Math.floor((km - base6) / 80)
-  const base7 = base6 + 800
-  if (km < base7 + 10*90) return 80 + Math.floor((km - base7) / 90)
-  const base8 = base7 + 900
-  return Math.min(100, 90 + Math.floor((km - base8) / 90))
+// ── FIREBASE CONFIG ─────────────────────────────────────────────────────────
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID
 }
 
-function kmForLevel(lvl) {
-  if (lvl <= 1) return 0
-  if (lvl <= 10) return lvl - 1
-  if (lvl <= 20) return 10 + (lvl - 10) * 20
-  if (lvl <= 30) return 10 + 200 + (lvl - 20) * 30
-  if (lvl <= 40) return 10 + 200 + 300 + (lvl - 30) * 40
-  if (lvl <= 50) return 10 + 200 + 300 + 400 + (lvl - 40) * 50
-  if (lvl <= 60) return 10 + 200 + 300 + 400 + 500 + (lvl - 50) * 60
-  if (lvl <= 70) return 10 + 200 + 300 + 400 + 500 + 600 + (lvl - 60) * 70
-  if (lvl <= 80) return 10 + 200 + 300 + 400 + 500 + 600 + 700 + (lvl - 70) * 80
-  if (lvl <= 90) return 10 + 200 + 300 + 400 + 500 + 600 + 700 + 800 + (lvl - 80) * 90
-  return 10 + 200 + 300 + 400 + 500 + 600 + 700 + 800 + 900 + (lvl - 90) * 90
+const app = initializeApp(firebaseConfig)
+const auth = getAuth(app)
+const db = getFirestore(app)
+
+// ── CONSTANTS ───────────────────────────────────────────────────────────────
+const CHECKIN_RADIUS_M = 300
+const DECAY_DAYS = 5        // dias sem visita para começar decair
+const DECAY_RATE = 10       // % por dia após DECAY_DAYS
+const SEASON_DURATION_DAYS = 30
+
+const LEVEL_THRESHOLDS = [0,1,2,3,4,5,6,7,8,9,10,30,50,70,90,110,130,150,180,210,250]
+const LEVEL_TITLES = ['Recruta','Iniciante','Explorador','Guerreiro','Veterano','Elite',
+  'Mestre','Grão-Mestre','Lendário','Mítico','Imortal','Supremo','Titan','Warlord',
+  'Conquistador','Dominador','Imperador','Semideus','Deus da Guerra','Supremo Eterno','IMORTAL']
+const LEVEL_BADGES = ['🥚','🐣','🐥','🐓','🦅','⚔️','👑','💎','🏆','🔱','⚡','🌟','🔥','💀','🗡️','🛡️','🏰','🌍','🌌','☄️','🚀']
+
+const CLAN_COLORS = ['#ef4444','#f97316','#eab308','#22c55e','#06b6d4','#6366f1','#a855f7','#ec4899','#14b8a6','#f43f5e']
+const CLAN_EMOJIS = ['⚔️','🐺','🦁','🐉','🦅','💀','🔥','⚡','🛡️','👑']
+
+// ── HELPERS ─────────────────────────────────────────────────────────────────
+function calcDistance(lat1, lng1, lat2, lng2) {
+  const R = 6371000
+  const dLat = (lat2 - lat1) * Math.PI / 180
+  const dLng = (lng2 - lng1) * Math.PI / 180
+  const a = Math.sin(dLat/2)**2 + Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLng/2)**2
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a))
 }
 
-function levelPointsBonus(lvl) { return lvl * 100 }
-
-const LEVEL_EMBLEMS = {
-  1:'🥚',2:'🐣',3:'🐥',4:'🐓',5:'🦅',
-  10:'⚔️',15:'🛡️',20:'🏹',25:'🗡️',30:'👑',
-  35:'💎',40:'🔱',45:'🌟',50:'🌠',60:'🔥',
-  70:'⚡',80:'🌊',90:'💀',100:'🏆',
-}
-function getLevelEmblem(lvl) {
-  const keys = Object.keys(LEVEL_EMBLEMS).map(Number).sort((a,b)=>b-a)
-  for (const k of keys) { if (lvl >= k) return LEVEL_EMBLEMS[k] }
-  return '🥚'
-}
-function getLevelTitle(lvl) {
-  if (lvl < 5)  return 'Iniciante'
-  if (lvl < 10) return 'Explorador'
-  if (lvl < 20) return 'Guerreiro'
-  if (lvl < 30) return 'Veterano'
-  if (lvl < 40) return 'Elite'
-  if (lvl < 50) return 'Mestre'
-  if (lvl < 60) return 'Grão-Mestre'
-  if (lvl < 70) return 'Lendário'
-  if (lvl < 80) return 'Mítico'
-  if (lvl < 90) return 'Imortal'
-  return 'Supremo'
-}
-
-// ── Challenges / Conquistas ────────────────────────────────────
-const CHALLENGES = [
-  // KM challenges
-  {id:'km_1',   name:'Primeiros Passos',   desc:'Acumule 1 km',         icon:'👟', pts:100,  check:(u)=>(u.km_total||0)>=1},
-  {id:'km_10',  name:'Maratonista',        desc:'Acumule 10 km',        icon:'🏃', pts:200,  check:(u)=>(u.km_total||0)>=10},
-  {id:'km_50',  name:'Ultra Runner',       desc:'Acumule 50 km',        icon:'🦅', pts:500,  check:(u)=>(u.km_total||0)>=50},
-  {id:'km_100', name:'Centurião',          desc:'Acumule 100 km',       icon:'⚔️', pts:1000, check:(u)=>(u.km_total||0)>=100},
-  {id:'km_500', name:'Lenda das Ruas',     desc:'Acumule 500 km',       icon:'🏆', pts:5000, check:(u)=>(u.km_total||0)>=500},
-  // Territory challenges
-  {id:'ter_1',  name:'Meu Território',     desc:'Conquiste 1 bairro',   icon:'🏴', pts:100,  check:(u,pts)=>pts.filter(p=>p.owner_id===u.uid).length>=1},
-  {id:'ter_5',  name:'Expansionista',      desc:'Conquiste 5 bairros',  icon:'🗺️', pts:300,  check:(u,pts)=>pts.filter(p=>p.owner_id===u.uid).length>=5},
-  {id:'ter_10', name:'Dominador',          desc:'Conquiste 10 bairros', icon:'👑', pts:700,  check:(u,pts)=>pts.filter(p=>p.owner_id===u.uid).length>=10},
-  {id:'ter_20', name:'Imperador',          desc:'Conquiste 20 bairros', icon:'🔱', pts:2000, check:(u,pts)=>pts.filter(p=>p.owner_id===u.uid).length>=20},
-  // Level challenges
-  {id:'lvl_5',  name:'Guerreiro Nível 5',  desc:'Alcance o nível 5',    icon:'🐓', pts:200,  check:(u)=>calcLevel(u.km_total||0)>=5},
-  {id:'lvl_10', name:'Veterano',           desc:'Alcance o nível 10',   icon:'🛡️', pts:500,  check:(u)=>calcLevel(u.km_total||0)>=10},
-  {id:'lvl_20', name:'Elite da Guerra',    desc:'Alcance o nível 20',   icon:'🏹', pts:1000, check:(u)=>calcLevel(u.km_total||0)>=20},
-  {id:'lvl_50', name:'Mestre Supremo',     desc:'Alcance o nível 50',   icon:'🌟', pts:5000, check:(u)=>calcLevel(u.km_total||0)>=50},
-  // Battle challenges
-  {id:'bat_1',  name:'Primeira Batalha',   desc:'Inicie 1 batalha',     icon:'⚔️', pts:150,  check:(u)=>(u.battles_started||0)>=1},
-  {id:'bat_5',  name:'Combatente',         desc:'Inicie 5 batalhas',    icon:'🗡️', pts:400,  check:(u)=>(u.battles_started||0)>=5},
-  {id:'bat_w1', name:'Primeira Vitória',   desc:'Vença 1 batalha',      icon:'🥇', pts:300,  check:(u)=>(u.battles_won||0)>=1},
-  {id:'bat_w5', name:'Invicto',            desc:'Vença 5 batalhas',     icon:'💎', pts:1000, check:(u)=>(u.battles_won||0)>=5},
-  // Checkin challenges
-  {id:'chk_1',  name:'Bem-vindo',          desc:'Faça seu 1º check-in', icon:'📍', pts:50,   check:(u)=>(u.checkins||0)>=1},
-  {id:'chk_10', name:'Explorador Urbano',  desc:'Faça 10 check-ins',    icon:'🗺️', pts:200,  check:(u)=>(u.checkins||0)>=10},
-  {id:'chk_50', name:'Andarilho',          desc:'Faça 50 check-ins',    icon:'🧭', pts:800,  check:(u)=>(u.checkins||0)>=50},
-]
-
-
-// ── Imgur upload ──────────────────────────────────────────────
-const IMGUR_CLIENT_ID = '546c25a59c58ad7' // public anonymous key
-async function uploadToImgur(file) {
-  const form = new FormData()
-  form.append('image', file)
-  const res = await fetch('https://api.imgur.com/3/image', {
-    method: 'POST',
-    headers: { Authorization: `Client-ID ${IMGUR_CLIENT_ID}` },
-    body: form,
-  })
-  const data = await res.json()
-  if (!data.success) throw new Error('Falha no upload')
-  return data.data.link
-}
-
-// ── icons ─────────────────────────────────────────────────────
-const I=({n,s=18,c='currentColor'})=>{
-  const d={
-    map:<><circle cx="12"cy="12"r="10"/><line x1="2"y1="12"x2="22"y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></>,
-    trophy:<><polyline points="8.21 13.89 7 23 12 20 17 23 15.79 13.88"/><path d="M8.21 13.89A5 5 0 0 1 7 10V5h10v5a5 5 0 0 1-1.21 3.89"/></>,
-    user:<><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12"cy="7"r="4"/></>,
-    forum:<><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></>,
-    sword:<><polyline points="14.5 17.5 3 6 3 3 6 3 17.5 14.5"/><line x1="13"y1="19"x2="19"y2="13"/><line x1="16"y1="16"x2="20"y2="20"/><line x1="19"y1="21"x2="21"y2="19"/></>,
-    shield:<><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></>,
-    flag:<><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4"y1="22"x2="4"y2="15"/></>,
-    plus:<><line x1="12"y1="5"x2="12"y2="19"/><line x1="5"y1="12"x2="19"y2="12"/></>,
-    check:<><polyline points="20 6 9 17 4 12"/></>,
-    x:<><line x1="18"y1="6"x2="6"y2="18"/><line x1="6"y1="6"x2="18"y2="18"/></>,
-    pin:<><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12"cy="10"r="3"/></>,
-    nav:<><polygon points="3 11 22 2 13 21 11 13 3 11"/></>,
-    wifi:<><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12"y1="20"x2="12.01"y2="20"/></>,
-    warn:<><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12"y1="9"x2="12"y2="13"/><line x1="12"y1="17"x2="12.01"y2="17"/></>,
-    edit:<><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></>,
-    trash:<><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></>,
-    camera:<><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12"cy="13"r="4"/></>,
-    heart:<><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></>,
-    msg:<><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></>,
-    send:<><line x1="22"y1="2"x2="11"y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></>,
-    zap:<><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></>,
-    star:<><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></>,
-    refresh:<><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></>,
-    locate:<><circle cx="12"cy="12"r="3"/><path d="M22 12h-4M6 12H2M12 6V2M12 22v-4"/></>,
+function getLevel(km) {
+  let level = 0
+  for (let i = 0; i < LEVEL_THRESHOLDS.length; i++) {
+    if (km >= LEVEL_THRESHOLDS[i]) level = i
+    else break
   }
-  return <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{d[n]}</svg>
+  return Math.min(level, LEVEL_THRESHOLDS.length - 1)
 }
 
-// ── GPS + KM Tracker ─────────────────────────────────────────
-const useGeo=(user,onKmUpdate)=>{
-  const[g,setG]=useState({lat:null,lng:null,acc:null,err:null,loading:true})
-  const lastPos=useRef(null)
-  const sessionKm=useRef(0)
-  const saveTimer=useRef(null)
-  const MIN_DIST=0.02  // min 20m to count movement
-  const MIN_ACC=50     // ignore if accuracy worse than 50m
-
-  useEffect(()=>{
-    if(!navigator.geolocation){setG(s=>({...s,err:'GPS não suportado.',loading:false}));return}
-    const ok=p=>{
-      const {latitude:lat,longitude:lng,accuracy:acc}=p.coords
-      setG({lat,lng,acc,err:null,loading:false})
-      // Track km if user logged in and accuracy good
-      if(user&&acc<MIN_ACC&&lastPos.current){
-        const dist=hav(lastPos.current.lat,lastPos.current.lng,lat,lng)/1000 // km
-        if(dist>=MIN_DIST&&dist<0.5){ // between 20m and 500m (filter GPS jumps)
-          sessionKm.current+=dist
-          // Save to Firestore every 0.1km accumulated
-          if(saveTimer.current)clearTimeout(saveTimer.current)
-          saveTimer.current=setTimeout(async()=>{
-            const km=parseFloat(sessionKm.current.toFixed(3))
-            if(km>0&&onKmUpdate){
-              await onKmUpdate(km)
-              sessionKm.current=0
-            }
-          },3000) // wait 3s of no movement before saving
-        }
-      }
-      lastPos.current={lat,lng}
-    }
-    const fail=e=>setG(s=>({...s,err:e.code===1?'Permissão de GPS negada.':'Localização indisponível.',loading:false}))
-    const opts={enableHighAccuracy:true,timeout:12000,maximumAge:2000}
-    navigator.geolocation.getCurrentPosition(ok,fail,opts)
-    const id=navigator.geolocation.watchPosition(ok,fail,opts)
-    return()=>{navigator.geolocation.clearWatch(id);if(saveTimer.current)clearTimeout(saveTimer.current)}
-  },[user?.uid])
-  return g
+function getStrength(point) {
+  if (!point.last_checkin) return 100
+  const days = (Date.now() - point.last_checkin.toDate().getTime()) / 86400000
+  if (days <= DECAY_DAYS) return 100
+  const decayed = Math.max(0, 100 - (days - DECAY_DAYS) * DECAY_RATE)
+  return Math.round(decayed)
 }
 
-// ── Neighborhood sync ─────────────────────────────────────────
-const useNeighborhoodSync=(geo,user,setLoadingNeighborhoods,setNeighborhoodStatus)=>{
-  const syncedRef=useRef(new Set())
-
-  const syncArea=useCallback(async(lat,lng,force=false)=>{
-    const key=`${(lat*4|0)/4}_${(lng*4|0)/4}`
-    if(!force&&syncedRef.current.has(key))return
-    syncedRef.current.add(key)
-    setLoadingNeighborhoods(true)
-    setNeighborhoodStatus('Buscando bairros...')
-    try{
-      const neighborhoods=await fetchNeighborhoodsByLocation(lat,lng)
-      setNeighborhoodStatus(`${neighborhoods.length} bairros encontrados. Salvando...`)
-      if(neighborhoods.length===0){
-        setNeighborhoodStatus('Nenhum bairro encontrado nesta área')
-        setLoadingNeighborhoods(false)
-        return
-      }
-      // Get existing osm_ids
-      const snap=await getDocs(collection(db,'conquest_points'))
-      const existing=new Set(snap.docs.map(d=>d.data().osm_id).filter(Boolean))
-      const news=neighborhoods.filter(n=>!existing.has(n.osm_id))
-      setNeighborhoodStatus(`Salvando ${news.length} novos bairros...`)
-      // Save in batches
-      for(let i=0;i<news.length;i+=10){
-        await Promise.all(news.slice(i,i+10).map(n=>
-          addDoc(collection(db,'conquest_points'),{...n,source:'osm',owner_id:null,owner_km:0,created_at:serverTimestamp()})
-        ))
-      }
-      setNeighborhoodStatus(`✅ ${news.length} bairros adicionados!`)
-      setTimeout(()=>setNeighborhoodStatus(''),3000)
-    }catch(e){
-      console.error('[WarMaps] sync error',e)
-      setNeighborhoodStatus('Erro ao buscar bairros. Tente novamente.')
-      syncedRef.current.delete(key)
-    }
-    setLoadingNeighborhoods(false)
-  },[])
-
-  // Auto-sync when GPS arrives
-  useEffect(()=>{
-    if(!geo.lat||!user)return
-    const t=setTimeout(()=>syncArea(geo.lat,geo.lng),2000)
-    return()=>clearTimeout(t)
-  },[geo.lat,user])
-
-  return syncArea
+function timeAgo(ts) {
+  if (!ts) return ''
+  const diff = Date.now() - ts.toDate().getTime()
+  const m = Math.floor(diff / 60000)
+  if (m < 60) return `${m}min`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h`
+  return `${Math.floor(h / 24)}d`
 }
 
-
-// ── Leaflet Map ───────────────────────────────────────────────
-const LeafletMap=({points,geo,profiles,selectedId,battles,addMode,onSelect,onMapClick})=>{
-  const ref=useRef(null),mapRef=useRef(null),layersRef=useRef({}),userRef=useRef(null),centeredRef=useRef(false)
-
-  useEffect(()=>{
-    if(mapRef.current||!window.L)return
-    const map=window.L.map(ref.current,{zoomControl:false,attributionControl:false}).setView([-23.575,-46.650],13)
-    window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map)
-    window.L.control.zoom({position:'bottomright'}).addTo(map)
-    map.on('click',e=>{if(window.__wmAdd)onMapClick({lat:e.latlng.lat,lng:e.latlng.lng})})
-    mapRef.current=map
-  },[])
-
-  useEffect(()=>{window.__wmAdd=addMode},[addMode])
-
-  // User dot + center once
-  useEffect(()=>{
-    const L=window.L,map=mapRef.current
-    if(!L||!map||!geo.lat)return
-    if(userRef.current)userRef.current.setLatLng([geo.lat,geo.lng])
-    else{
-      userRef.current=L.circleMarker([geo.lat,geo.lng],{radius:10,fillColor:'#4f46e5',fillOpacity:1,color:'#fff',weight:3,zIndexOffset:1000}).addTo(map)
-    }
-    if(!centeredRef.current){map.setView([geo.lat,geo.lng],14);centeredRef.current=true}
-  },[geo.lat,geo.lng])
-
-  // Draw conquest circles
-  useEffect(()=>{
-    const L=window.L,map=mapRef.current
-    if(!L||!map)return
-    Object.values(layersRef.current).forEach(l=>l.remove())
-    layersRef.current={}
-    points.forEach(pt=>{
-      const p=profiles[pt.owner_id]
-      const color=p?.avatar_color||pt.owner_color||(pt.owner_id?'#4f46e5':'#94a3b8')
-      const inBattle=battles.some(b=>b.conquest_point_id===pt.id)
-      const isSel=selectedId===pt.id
-      const g=L.layerGroup().addTo(map)
-      L.circle([pt.lat,pt.lng],{
-        radius:pt.radius_m,
-        fillColor:pt.owner_id?color:'#94a3b8',
-        fillOpacity:pt.owner_id?0.2:0.06,
-        color:inBattle?'#dc2626':isSel?'#1d4ed8':(pt.owner_id?color:'#cbd5e1'),
-        weight:isSel?3:inBattle?2.5:1,
-        dashArray:inBattle?'6 4':null,
-      }).on('click',()=>onSelect(pt)).addTo(g)
-      const ownerInitial=p?.display_name?.charAt(0)||pt.owner_name?.charAt(0)||''
-      const labelColor=pt.owner_id?color:'#94a3b8'
-      L.marker([pt.lat,pt.lng],{icon:L.divIcon({
-        className:'',
-        html:`<div style="background:${labelColor};color:#fff;padding:2px 8px;border-radius:16px;font-size:11px;font-weight:700;white-space:nowrap;box-shadow:0 1px 6px rgba(0,0,0,0.18);font-family:monospace;opacity:${pt.owner_id?1:0.7}">${inBattle?'⚔ ':''}${pt.name}${ownerInitial?' · '+ownerInitial:''}</div>`,
-        iconAnchor:[0,0],
-      })}).on('click',()=>onSelect(pt)).addTo(g)
-      layersRef.current[pt.id]=g
-    })
-  },[points,profiles,selectedId,battles])
-
-  return(
-    <div style={{position:'relative',width:'100%',height:'100%'}}>
-      <div ref={ref} style={{width:'100%',height:'100%'}}/>
-      {addMode&&<div style={{position:'absolute',top:'40%',left:'50%',transform:'translateX(-50%)',background:'#4f46e5',color:'#fff',padding:'10px 18px',borderRadius:12,fontSize:13,fontWeight:700,pointerEvents:'none',boxShadow:'0 4px 20px rgba(79,70,229,0.4)',zIndex:1000}}>📍 Toque no mapa para posicionar</div>}
-    </div>
-  )
+// ── CUSTOM ICONS ─────────────────────────────────────────────────────────────
+function makeIcon(color, strength = 100, isWZ = false) {
+  const alpha = 0.4 + (strength / 100) * 0.6
+  const size = isWZ ? 36 : 28
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 36 36">
+    <circle cx="18" cy="18" r="14" fill="${color}" fill-opacity="${alpha}" stroke="${color}" stroke-width="2.5"/>
+    <circle cx="18" cy="18" r="5" fill="${color}" fill-opacity="0.9"/>
+    ${strength < 100 ? `<text x="18" y="8" text-anchor="middle" fill="white" font-size="7" font-weight="bold">${strength}%</text>` : ''}
+    ${isWZ ? `<text x="18" y="32" text-anchor="middle" fill="${color}" font-size="10">⚔️</text>` : ''}
+  </svg>`
+  return L.divIcon({
+    html: svg, className: '', iconSize: [size, size], iconAnchor: [size/2, size/2]
+  })
 }
 
-// ── Neighborhood loading indicator ────────────────────────────
-const NeighborhoodLoader=({loading,status,count,geo,onManualSync})=>{
-  if(loading)return(
-    <div style={{position:'absolute',top:60,left:'50%',transform:'translateX(-50%)',background:'#fff',border:'1px solid #c7d2fe',borderRadius:20,padding:'8px 18px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:600,color:'#4f46e5',zIndex:1000,boxShadow:'0 2px 12px rgba(0,0,0,0.12)',whiteSpace:'nowrap',maxWidth:'90vw'}}>
-      <I n="refresh" s={13} c="#4f46e5"/>{status||'Buscando bairros...'}
-    </div>
-  )
-  if(status&&!loading)return(
-    <div style={{position:'absolute',top:60,left:'50%',transform:'translateX(-50%)',background:status.startsWith('✅')?'#f0fdf4':'#fffbeb',border:`1px solid ${status.startsWith('✅')?'#86efac':'#fcd34d'}`,borderRadius:20,padding:'8px 18px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:600,color:status.startsWith('✅')?'#166534':'#92400e',zIndex:1000,boxShadow:'0 2px 12px rgba(0,0,0,0.12)',whiteSpace:'nowrap',maxWidth:'90vw'}}>
-      {status}
-    </div>
-  )
-  if(count===0&&geo?.lat&&!loading)return(
-    <div style={{position:'absolute',top:60,left:'50%',transform:'translateX(-50%)',background:'#fff',border:'1px solid #e2e8f0',borderRadius:20,padding:'8px 18px',display:'flex',alignItems:'center',gap:10,fontSize:12,fontWeight:600,color:'#64748b',zIndex:1000,boxShadow:'0 2px 12px rgba(0,0,0,0.1)',whiteSpace:'nowrap'}}>
-      <I n="warn" s={13} c="#d97706"/> Sem bairros
-      <button onClick={onManualSync} style={{background:'#4f46e5',border:'none',borderRadius:12,padding:'4px 12px',color:'#fff',cursor:'pointer',fontSize:11,fontWeight:700}}>Carregar</button>
-    </div>
-  )
+function makeUserIcon(color) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32">
+    <circle cx="16" cy="16" r="12" fill="${color}" fill-opacity="0.2" stroke="${color}" stroke-width="2"/>
+    <circle cx="16" cy="16" r="6" fill="${color}"/>
+    <circle cx="16" cy="16" r="10" fill="none" stroke="${color}" stroke-width="1.5" stroke-dasharray="3 2" opacity="0.6">
+      <animateTransform attributeName="transform" type="rotate" from="0 16 16" to="360 16 16" dur="8s" repeatCount="indefinite"/>
+    </circle>
+  </svg>`
+  return L.divIcon({ html: svg, className: '', iconSize: [32,32], iconAnchor: [16,16] })
+}
+
+// ── MAP CLICK HANDLER ────────────────────────────────────────────────────────
+function MapClickHandler({ onMapClick, enabled }) {
+  useMapEvents({ click: (e) => { if (enabled) onMapClick(e.latlng) } })
   return null
 }
 
-// ── Photo Upload ──────────────────────────────────────────────
-const PhotoUpload=({currentUrl,onUploaded})=>{
-  const[uploading,setUploading]=useState(false)
-  const[err,setErr]=useState('')
-  const fileRef=useRef(null)
+// ══════════════════════════════════════════════════════════════════════════════
+// MAIN APP
+// ══════════════════════════════════════════════════════════════════════════════
+export default function App() {
+  const [user, setUser] = useState(null)
+  const [profile, setProfile] = useState(null)
+  const [tab, setTab] = useState('map')
+  const [loading, setLoading] = useState(true)
+  const [toast, setToast] = useState(null)
 
-  const handle=async(e)=>{
-    const file=e.target.files?.[0]
-    if(!file)return
-    if(file.size>5*1024*1024){setErr('Foto muito grande (máx 5MB)');return}
-    setUploading(true);setErr('')
-    try{
-      const url=await uploadToImgur(file)
-      onUploaded(url)
-    }catch(e){setErr('Falha no upload. Tente novamente.')}
-    setUploading(false)
+  // Map state
+  const [points, setPoints] = useState([])
+  const [warZones, setWarZones] = useState([])
+  const [battles, setBattles] = useState([])
+  const [profiles, setProfiles] = useState({})
+  const [clans, setClans] = useState([])
+  const [notifications, setNotifications] = useState([])
+  const [season, setSeason] = useState(null)
+
+  const [userPos, setUserPos] = useState(null)
+  const [selectedPoint, setSelectedPoint] = useState(null)
+  const [selectedZone, setSelectedZone] = useState(null)
+
+  // ADM modes
+  const [admMode, setAdmMode] = useState(null) // 'point' | 'warzone'
+  const [admForm, setAdmForm] = useState({ name: '', type: 'neighborhood', lat: null, lng: null })
+  const [wzForm, setWzForm] = useState({ name: '', days: 7, lat: null, lng: null, radius: 500 })
+
+  // Clan state
+  const [showClanModal, setShowClanModal] = useState(false)
+  const [showCreateClan, setShowCreateClan] = useState(false)
+  const [clanForm, setClanForm] = useState({ name: '', description: '', color: CLAN_COLORS[0], emoji: CLAN_EMOJIS[0] })
+  const [myClan, setMyClan] = useState(null)
+  const [clanInvites, setClanInvites] = useState([])
+
+  // Rivalry
+  const [rivalries, setRivalries] = useState([])
+
+  const mapRef = useRef(null)
+
+  const showToast = useCallback((msg, type = 'info') => {
+    setToast({ msg, type })
+    setTimeout(() => setToast(null), 3000)
+  }, [])
+
+  // ── AUTH ──────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    return onAuthStateChanged(auth, async (u) => {
+      setUser(u)
+      if (u) {
+        const snap = await getDoc(doc(db, 'profiles', u.uid))
+        if (snap.exists()) setProfile(snap.data())
+      } else {
+        setProfile(null)
+      }
+      setLoading(false)
+    })
+  }, [])
+
+  // ── GEOLOCATION ───────────────────────────────────────────────────────────
+  useEffect(() => {
+    const watcher = navigator.geolocation.watchPosition(
+      (pos) => setUserPos({ lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy }),
+      () => {},
+      { enableHighAccuracy: true, maximumAge: 10000 }
+    )
+    return () => navigator.geolocation.clearWatch(watcher)
+  }, [])
+
+  // ── REALTIME LISTENERS ─────────────────────────────────────────────────────
+  useEffect(() => {
+    const unsubs = []
+
+    unsubs.push(onSnapshot(collection(db, 'conquest_points'), snap => {
+      setPoints(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    }))
+
+    unsubs.push(onSnapshot(collection(db, 'war_zones'), snap => {
+      const now = Date.now()
+      setWarZones(snap.docs
+        .map(d => ({ id: d.id, ...d.data() }))
+        .filter(z => !z.ends_at || z.ends_at.toDate().getTime() > now)
+      )
+    }))
+
+    unsubs.push(onSnapshot(query(collection(db, 'battles'), where('status', '==', 'active')), snap => {
+      setBattles(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    }))
+
+    unsubs.push(onSnapshot(collection(db, 'profiles'), snap => {
+      const map = {}
+      snap.docs.forEach(d => { map[d.id] = d.data() })
+      setProfiles(map)
+    }))
+
+    unsubs.push(onSnapshot(collection(db, 'clans'), snap => {
+      setClans(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    }))
+
+    unsubs.push(onSnapshot(query(collection(db, 'seasons'), orderBy('created_at', 'desc'), limit(1)), snap => {
+      if (!snap.empty) setSeason({ id: snap.docs[0].id, ...snap.docs[0].data() })
+    }))
+
+    return () => unsubs.forEach(u => u())
+  }, [])
+
+  // ── NOTIFICATIONS ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!user) return
+    const unsub = onSnapshot(
+      query(collection(db, 'notifications'), where('to_uid', '==', user.uid), where('read', '==', false), limit(20)),
+      snap => setNotifications(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    )
+    return unsub
+  }, [user])
+
+  // ── CLAN ──────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!profile?.clan_id) { setMyClan(null); return }
+    const c = clans.find(c => c.id === profile.clan_id)
+    setMyClan(c || null)
+  }, [profile, clans])
+
+  useEffect(() => {
+    if (!user) return
+    const unsub = onSnapshot(
+      query(collection(db, 'clan_invites'), where('to_uid', '==', user.uid), where('status', '==', 'pending')),
+      snap => setClanInvites(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    )
+    return unsub
+  }, [user])
+
+  // ── RIVALRIES ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!user) return
+    const unsub = onSnapshot(
+      query(collection(db, 'rivalries'), where('players', 'array-contains', user.uid)),
+      snap => setRivalries(snap.docs.map(d => ({ id: d.id, ...d.data() })))
+    )
+    return unsub
+  }, [user])
+
+  // ── MAP CLICK (ADM) ───────────────────────────────────────────────────────
+  const handleMapClick = useCallback(async (latlng) => {
+    if (!profile?.is_admin) return
+    if (admMode === 'point') {
+      setAdmForm(f => ({ ...f, lat: latlng.lat, lng: latlng.lng }))
+    } else if (admMode === 'warzone') {
+      setWzForm(f => ({ ...f, lat: latlng.lat, lng: latlng.lng }))
+    }
+  }, [profile, admMode])
+
+  // ── CREATE CONQUEST POINT ──────────────────────────────────────────────────
+  const createPoint = useCallback(async () => {
+    if (!admForm.name || !admForm.lat) return showToast('Clique no mapa primeiro', 'err')
+    await addDoc(collection(db, 'conquest_points'), {
+      name: admForm.name,
+      type: admForm.type,
+      lat: admForm.lat,
+      lng: admForm.lng,
+      owner_id: null,
+      owner_name: null,
+      clan_id: null,
+      last_checkin: null,
+      checkin_count: 0,
+      created_at: serverTimestamp()
+    })
+    setAdmForm({ name: '', type: 'neighborhood', lat: null, lng: null })
+    setAdmMode(null)
+    showToast('Ponto criado!', 'ok')
+  }, [admForm, showToast])
+
+  // ── CREATE WAR ZONE ────────────────────────────────────────────────────────
+  const createWarZone = useCallback(async () => {
+    if (!wzForm.name || !wzForm.lat) return showToast('Clique no mapa para posicionar a zona', 'err')
+    const endsAt = new Date(Date.now() + wzForm.days * 86400000)
+    await addDoc(collection(db, 'war_zones'), {
+      name: wzForm.name,
+      lat: wzForm.lat,
+      lng: wzForm.lng,
+      radius: Number(wzForm.radius),
+      days: Number(wzForm.days),
+      ends_at: Timestamp.fromDate(endsAt),
+      created_by: user.uid,
+      created_at: serverTimestamp(),
+      winner_uid: null,
+      winner_name: null
+    })
+    setWzForm({ name: '', days: 7, lat: null, lng: null, radius: 500 })
+    setAdmMode(null)
+    showToast('⚔️ Zona de Guerra criada!', 'ok')
+  }, [wzForm, user, showToast])
+
+  // ── CHECKIN ────────────────────────────────────────────────────────────────
+  const doCheckin = useCallback(async (point) => {
+    if (!user || !userPos) return showToast('GPS necessário', 'err')
+    const dist = calcDistance(userPos.lat, userPos.lng, point.lat, point.lng)
+    if (dist > CHECKIN_RADIUS_M) return showToast(`Você está a ${Math.round(dist)}m. Precisa estar a ${CHECKIN_RADIUS_M}m`, 'warn')
+
+    const prevOwner = point.owner_id
+    const batch = writeBatch(db)
+    const pointRef = doc(db, 'conquest_points', point.id)
+
+    batch.update(pointRef, {
+      owner_id: user.uid,
+      owner_name: profile.display_name,
+      clan_id: profile.clan_id || null,
+      last_checkin: serverTimestamp(),
+      checkin_count: increment(1)
+    })
+
+    batch.set(doc(collection(db, 'checkins')), {
+      user_id: user.uid,
+      point_id: point.id,
+      point_name: point.name,
+      lat: userPos.lat,
+      lng: userPos.lng,
+      created_at: serverTimestamp()
+    })
+
+    // KM update
+    const lastCheckin = point.last_checkin
+    if (lastCheckin && point.owner_id === user.uid) {
+      const hoursAgo = (Date.now() - lastCheckin.toDate().getTime()) / 3600000
+      const kmsEarned = Math.min(hoursAgo * 0.1, 2) // máx 2km por checkin
+      batch.update(doc(db, 'profiles', user.uid), {
+        km_total: increment(kmsEarned),
+        points: increment(10)
+      })
+    } else {
+      batch.update(doc(db, 'profiles', user.uid), { points: increment(25) })
+    }
+
+    await batch.commit()
+
+    // Notificar dono anterior
+    if (prevOwner && prevOwner !== user.uid) {
+      await addDoc(collection(db, 'notifications'), {
+        to_uid: prevOwner,
+        from_uid: user.uid,
+        from_name: profile.display_name,
+        type: 'conquest',
+        point_name: point.name,
+        message: `${profile.display_name} tomou seu território: ${point.name}!`,
+        read: false,
+        created_at: serverTimestamp()
+      })
+
+      // Registrar rivalidade
+      await updateRivalry(user.uid, prevOwner, 'conquest')
+    }
+
+    // Checkin na Zona de Guerra se estiver dentro
+    for (const zone of warZones) {
+      const dZone = calcDistance(userPos.lat, userPos.lng, zone.lat, zone.lng)
+      if (dZone <= zone.radius) {
+        await addDoc(collection(db, 'wz_checkins'), {
+          zone_id: zone.id,
+          user_id: user.uid,
+          user_name: profile.display_name,
+          clan_id: profile.clan_id || null,
+          created_at: serverTimestamp()
+        })
+      }
+    }
+
+    setSelectedPoint(null)
+    showToast(`✅ ${point.name} conquistado!`, 'ok')
+    // Refresh profile
+    const snap = await getDoc(doc(db, 'profiles', user.uid))
+    if (snap.exists()) setProfile(snap.data())
+  }, [user, userPos, profile, warZones, showToast])
+
+  // ── RIVALRY ───────────────────────────────────────────────────────────────
+  const updateRivalry = async (uid1, uid2, type) => {
+    const key = [uid1, uid2].sort().join('_')
+    const ref = doc(db, 'rivalries', key)
+    const snap = await getDoc(ref)
+    if (snap.exists()) {
+      await updateDoc(ref, {
+        count: increment(1),
+        last_event: serverTimestamp(),
+        [`score_${uid1}`]: increment(1)
+      })
+    } else {
+      await setDoc(ref, {
+        players: [uid1, uid2],
+        count: 1,
+        last_event: serverTimestamp(),
+        [`score_${uid1}`]: 1,
+        [`score_${uid2}`]: 0,
+        created_at: serverTimestamp()
+      })
+    }
   }
 
-  return(
-    <div style={{marginBottom:16}}>
-      <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:8}}>Foto de perfil</label>
-      <div style={{display:'flex',alignItems:'center',gap:12}}>
-        <div style={{width:60,height:60,borderRadius:'50%',overflow:'hidden',border:'2px solid #e2e8f0',flexShrink:0,background:'#f1f5f9',display:'flex',alignItems:'center',justifyContent:'center'}}>
-          {currentUrl?<img src={currentUrl} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<I n="user" s={24} c="#94a3b8"/>}
+  // ── CLAN ACTIONS ──────────────────────────────────────────────────────────
+  const createClan = useCallback(async () => {
+    if (!clanForm.name.trim()) return showToast('Nome obrigatório', 'err')
+    if (profile?.clan_id) return showToast('Saia do seu clan primeiro', 'err')
+
+    const clanRef = await addDoc(collection(db, 'clans'), {
+      name: clanForm.name.trim(),
+      description: clanForm.description,
+      color: clanForm.color,
+      emoji: clanForm.emoji,
+      owner_id: user.uid,
+      owner_name: profile.display_name,
+      members: [user.uid],
+      member_count: 1,
+      created_at: serverTimestamp()
+    })
+
+    await updateDoc(doc(db, 'profiles', user.uid), { clan_id: clanRef.id })
+    const snap = await getDoc(doc(db, 'profiles', user.uid))
+    if (snap.exists()) setProfile(snap.data())
+
+    setShowCreateClan(false)
+    setClanForm({ name: '', description: '', color: CLAN_COLORS[0], emoji: CLAN_EMOJIS[0] })
+    showToast(`⚔️ Clan ${clanForm.name} criado!`, 'ok')
+  }, [clanForm, user, profile, showToast])
+
+  const leaveClan = useCallback(async () => {
+    if (!profile?.clan_id) return
+    const clanRef = doc(db, 'clans', profile.clan_id)
+    const clanSnap = await getDoc(clanRef)
+    if (!clanSnap.exists()) return
+
+    const clanData = clanSnap.data()
+    const newMembers = (clanData.members || []).filter(m => m !== user.uid)
+
+    if (newMembers.length === 0) {
+      await deleteDoc(clanRef)
+    } else {
+      await updateDoc(clanRef, {
+        members: newMembers,
+        member_count: newMembers.length,
+        ...(clanData.owner_id === user.uid ? { owner_id: newMembers[0] } : {})
+      })
+    }
+
+    await updateDoc(doc(db, 'profiles', user.uid), { clan_id: null })
+    const snap = await getDoc(doc(db, 'profiles', user.uid))
+    if (snap.exists()) setProfile(snap.data())
+    showToast('Você saiu do clan', 'info')
+  }, [profile, user, showToast])
+
+  const inviteToClan = useCallback(async (targetUid) => {
+    if (!profile?.clan_id) return showToast('Você não está em nenhum clan', 'err')
+    await addDoc(collection(db, 'clan_invites'), {
+      clan_id: profile.clan_id,
+      clan_name: myClan?.name,
+      from_uid: user.uid,
+      from_name: profile.display_name,
+      to_uid: targetUid,
+      status: 'pending',
+      created_at: serverTimestamp()
+    })
+    showToast('Convite enviado!', 'ok')
+  }, [profile, myClan, user, showToast])
+
+  const respondInvite = useCallback(async (invite, accept) => {
+    if (accept) {
+      const clanRef = doc(db, 'clans', invite.clan_id)
+      const clanSnap = await getDoc(clanRef)
+      if (!clanSnap.exists()) return showToast('Clan não existe mais', 'err')
+      const clanData = clanSnap.data()
+
+      if (profile?.clan_id) await leaveClan()
+
+      await updateDoc(clanRef, {
+        members: [...(clanData.members || []), user.uid],
+        member_count: increment(1)
+      })
+      await updateDoc(doc(db, 'profiles', user.uid), { clan_id: invite.clan_id })
+      const snap = await getDoc(doc(db, 'profiles', user.uid))
+      if (snap.exists()) setProfile(snap.data())
+      showToast(`⚔️ Entrou no clan ${invite.clan_name}!`, 'ok')
+    }
+    await deleteDoc(doc(db, 'clan_invites', invite.id))
+  }, [profile, user, leaveClan, showToast])
+
+  const markNotifRead = useCallback(async (notifId) => {
+    await updateDoc(doc(db, 'notifications', notifId), { read: true })
+  }, [])
+
+  // ── SEASON ─────────────────────────────────────────────────────────────────
+  const createSeason = useCallback(async () => {
+    if (!profile?.is_admin) return
+    const endsAt = new Date(Date.now() + SEASON_DURATION_DAYS * 86400000)
+    await addDoc(collection(db, 'seasons'), {
+      name: `Temporada ${new Date().toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' })}`,
+      ends_at: Timestamp.fromDate(endsAt),
+      created_at: serverTimestamp(),
+      active: true
+    })
+    showToast('🏆 Nova temporada iniciada!', 'ok')
+  }, [profile, showToast])
+
+  // ── REGISTER / LOGIN ───────────────────────────────────────────────────────
+  if (!user && !loading) return <AuthScreen auth={auth} db={db} showToast={showToast} />
+  if (loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',background:'#f8fafc',fontSize:24}}>⚔️</div>
+
+  const level = getLevel(profile?.km_total || 0)
+  const myPoints = points.filter(p => p.owner_id === user?.uid)
+  const myRivalry = rivalries.reduce((best, r) => {
+    if (!best || r.count > best.count) return r
+    return best
+  }, null)
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // RENDER
+  // ══════════════════════════════════════════════════════════════════════════
+  return (
+    <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: '#f1f5f9', fontFamily: "'Inter', system-ui, sans-serif", overflow: 'hidden' }}>
+
+      {/* HEADER */}
+      <header style={{ background: '#fff', borderBottom: '1px solid #e2e8f0', padding: '10px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', zIndex: 10, flexShrink: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span style={{ fontSize: 22, fontWeight: 900, background: 'linear-gradient(135deg,#ef4444,#f97316)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>⚔ WAR MAPS</span>
+          {season && (
+            <span style={{ fontSize: 10, background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: 20, fontWeight: 700, border: '1px solid #fde68a' }}>
+              🏆 {season.name}
+            </span>
+          )}
         </div>
-        <div style={{flex:1}}>
-          <input ref={fileRef} type="file" accept="image/*" onChange={handle} style={{display:'none'}}/>
-          <button onClick={()=>fileRef.current?.click()} disabled={uploading} style={{width:'100%',padding:'9px',borderRadius:10,border:'1px dashed #c7d2fe',background:'#f8fafc',color:'#4f46e5',cursor:uploading?'wait':'pointer',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
-            {uploading?<><I n="refresh" s={14} c="#4f46e5"/> Enviando...</>:<><I n="camera" s={14} c="#4f46e5"/> {currentUrl?'Trocar foto':'Enviar foto'}</>}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {notifications.length > 0 && (
+            <button onClick={() => setTab('notifications')} style={{ position: 'relative', background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, padding: 4 }}>
+              🔔
+              <span style={{ position: 'absolute', top: 0, right: 0, background: '#ef4444', color: '#fff', fontSize: 9, fontWeight: 700, borderRadius: '50%', width: 14, height: 14, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{notifications.length}</span>
+            </button>
+          )}
+          {clanInvites.length > 0 && (
+            <button onClick={() => setTab('clan')} style={{ background: '#fef3c7', border: '1px solid #fde68a', borderRadius: 20, padding: '3px 10px', fontSize: 11, fontWeight: 700, color: '#92400e', cursor: 'pointer' }}>
+              ⚔️ {clanInvites.length} convite{clanInvites.length > 1 ? 's' : ''}
+            </button>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: '#f8fafc', borderRadius: 20, padding: '4px 10px', border: '1px solid #e2e8f0' }}>
+            <span style={{ fontSize: 13 }}>{LEVEL_BADGES[level]}</span>
+            <span style={{ fontSize: 12, fontWeight: 700, color: '#0f172a' }}>{LEVEL_TITLES[level]}</span>
+          </div>
+        </div>
+      </header>
+
+      {/* CONTENT */}
+      <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
+
+        {/* ── MAP TAB ── */}
+        {tab === 'map' && (
+          <div style={{ height: '100%', position: 'relative' }}>
+            <MapContainer
+              center={userPos ? [userPos.lat, userPos.lng] : [-23.5505, -46.6333]}
+              zoom={14}
+              style={{ height: '100%', width: '100%' }}
+              zoomControl={false}
+              ref={mapRef}
+            >
+              <TileLayer url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png" />
+              <ZoomControl position="bottomright" />
+              <MapClickHandler onMapClick={handleMapClick} enabled={!!admMode} />
+
+              {/* User position */}
+              {userPos && (
+                <Marker position={[userPos.lat, userPos.lng]} icon={makeUserIcon(profile?.clan_id ? (clans.find(c=>c.id===profile.clan_id)?.color || '#6366f1') : '#6366f1')}>
+                  <Popup><b>Você está aqui</b><br />Precisão: ±{Math.round(userPos.acc || 0)}m</Popup>
+                </Marker>
+              )}
+
+              {/* War Zones */}
+              {warZones.map(zone => {
+                const daysLeft = zone.ends_at ? Math.ceil((zone.ends_at.toDate() - Date.now()) / 86400000) : '?'
+                return (
+                  <div key={zone.id}>
+                    <Circle
+                      center={[zone.lat, zone.lng]}
+                      radius={zone.radius}
+                      pathOptions={{ color: '#ef4444', fillColor: '#ef4444', fillOpacity: 0.08, weight: 2, dashArray: '6 4' }}
+                      eventHandlers={{ click: () => setSelectedZone(zone) }}
+                    />
+                    <Marker position={[zone.lat, zone.lng]} icon={makeIcon('#ef4444', 100, true)}>
+                      <Popup>
+                        <b>⚔️ {zone.name}</b><br />
+                        Zona de Guerra<br />
+                        {daysLeft}d restantes
+                        <br /><button onClick={() => setSelectedZone(zone)} style={{ marginTop: 4, padding: '4px 10px', background: '#ef4444', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11 }}>Ver detalhes</button>
+                      </Popup>
+                    </Marker>
+                  </div>
+                )
+              })}
+
+              {/* Conquest points */}
+              {points.map(point => {
+                const strength = getStrength(point)
+                const ownerProfile = point.owner_id ? profiles[point.owner_id] : null
+                const ownerClan = ownerProfile?.clan_id ? clans.find(c => c.id === ownerProfile.clan_id) : null
+                const color = ownerClan?.color || (point.owner_id ? '#6366f1' : '#94a3b8')
+                const hasBattle = battles.some(b => b.point_id === point.id)
+                return (
+                  <Marker
+                    key={point.id}
+                    position={[point.lat, point.lng]}
+                    icon={makeIcon(hasBattle ? '#ef4444' : color, strength)}
+                    eventHandlers={{ click: () => setSelectedPoint(point) }}
+                  >
+                    <Popup>
+                      <b>{point.name}</b><br />
+                      {point.owner_name ? `Dono: ${point.owner_name}` : 'Livre'}<br />
+                      Força: {strength}%
+                      {hasBattle && <><br /><b style={{color:'#ef4444'}}>⚔️ Em batalha!</b></>}
+                      <br /><button onClick={() => setSelectedPoint(point)} style={{ marginTop: 4, padding: '4px 10px', background: '#6366f1', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 11 }}>Abrir</button>
+                    </Popup>
+                  </Marker>
+                )
+              })}
+
+              {/* ADM preview */}
+              {admMode === 'point' && admForm.lat && (
+                <Marker position={[admForm.lat, admForm.lng]} icon={makeIcon('#10b981', 100)} />
+              )}
+              {admMode === 'warzone' && wzForm.lat && (
+                <Circle center={[wzForm.lat, wzForm.lng]} radius={Number(wzForm.radius)} pathOptions={{ color: '#ef4444', fillColor: '#ef4444', fillOpacity: 0.15 }} />
+              )}
+            </MapContainer>
+
+            {/* Checkin radius indicator */}
+            {userPos && (
+              <div style={{ position: 'absolute', bottom: 80, left: 16, background: 'rgba(255,255,255,0.95)', borderRadius: 10, padding: '6px 12px', fontSize: 11, color: '#64748b', boxShadow: '0 2px 8px rgba(0,0,0,0.1)', zIndex: 1000 }}>
+                📍 GPS ±{Math.round(userPos.acc || 0)}m | Raio check-in: {CHECKIN_RADIUS_M}m
+              </div>
+            )}
+
+            {/* ADM panel */}
+            {profile?.is_admin && (
+              <div style={{ position: 'absolute', top: 12, right: 12, zIndex: 1000, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <button
+                  onClick={() => setAdmMode(admMode === 'point' ? null : 'point')}
+                  style={{ padding: '8px 14px', background: admMode === 'point' ? '#10b981' : '#fff', color: admMode === 'point' ? '#fff' : '#0f172a', border: '1px solid #e2e8f0', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}
+                >
+                  {admMode === 'point' ? '✕ Cancelar' : '📍 Add Ponto'}
+                </button>
+                <button
+                  onClick={() => setAdmMode(admMode === 'warzone' ? null : 'warzone')}
+                  style={{ padding: '8px 14px', background: admMode === 'warzone' ? '#ef4444' : '#fff', color: admMode === 'warzone' ? '#fff' : '#0f172a', border: '1px solid #e2e8f0', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', boxShadow: '0 2px 8px rgba(0,0,0,0.1)' }}
+                >
+                  {admMode === 'warzone' ? '✕ Cancelar' : '⚔️ Add Zona de Guerra'}
+                </button>
+              </div>
+            )}
+
+            {/* ADM form — add point */}
+            {admMode === 'point' && (
+              <div style={{ position: 'absolute', bottom: 80, right: 12, background: '#fff', borderRadius: 14, padding: 16, boxShadow: '0 4px 24px rgba(0,0,0,0.15)', zIndex: 1000, width: 240 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10, color: '#0f172a' }}>📍 {admForm.lat ? `${admForm.lat.toFixed(4)}, ${admForm.lng.toFixed(4)}` : 'Clique no mapa...'}</div>
+                <input value={admForm.name} onChange={e => setAdmForm(f => ({ ...f, name: e.target.value }))} placeholder="Nome do bairro" style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, marginBottom: 8, boxSizing: 'border-box' }} />
+                <select value={admForm.type} onChange={e => setAdmForm(f => ({ ...f, type: e.target.value }))} style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, marginBottom: 10, boxSizing: 'border-box' }}>
+                  <option value="neighborhood">Bairro</option>
+                  <option value="district">Distrito</option>
+                  <option value="area">Área</option>
+                  <option value="landmark">Ponto turístico</option>
+                </select>
+                <button onClick={createPoint} disabled={!admForm.lat || !admForm.name} style={{ width: '100%', padding: '9px', background: '#10b981', color: '#fff', border: 'none', borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+                  Criar ponto
+                </button>
+              </div>
+            )}
+
+            {/* ADM form — war zone */}
+            {admMode === 'warzone' && (
+              <div style={{ position: 'absolute', bottom: 80, right: 12, background: '#fff', borderRadius: 14, padding: 16, boxShadow: '0 4px 24px rgba(0,0,0,0.15)', zIndex: 1000, width: 260 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10, color: '#ef4444' }}>⚔️ Nova Zona de Guerra</div>
+                <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 8 }}>{wzForm.lat ? `${wzForm.lat.toFixed(4)}, ${wzForm.lng.toFixed(4)}` : 'Clique no mapa...'}</div>
+                <input value={wzForm.name} onChange={e => setWzForm(f => ({ ...f, name: e.target.value }))} placeholder="Nome da zona" style={{ width: '100%', padding: '8px 10px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, marginBottom: 8, boxSizing: 'border-box' }} />
+                <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ fontSize: 11, color: '#64748b' }}>Duração (dias)</label>
+                    <input type="number" value={wzForm.days} onChange={e => setWzForm(f => ({ ...f, days: e.target.value }))} min="1" max="30" style={{ width: '100%', padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, boxSizing: 'border-box' }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ fontSize: 11, color: '#64748b' }}>Raio (m)</label>
+                    <input type="number" value={wzForm.radius} onChange={e => setWzForm(f => ({ ...f, radius: e.target.value }))} min="100" max="5000" style={{ width: '100%', padding: '6px 8px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, boxSizing: 'border-box' }} />
+                  </div>
+                </div>
+                <button onClick={createWarZone} disabled={!wzForm.lat || !wzForm.name} style={{ width: '100%', padding: '9px', background: '#ef4444', color: '#fff', border: 'none', borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+                  ⚔️ Criar Zona de Guerra
+                </button>
+              </div>
+            )}
+
+            {/* Selected point panel */}
+            {selectedPoint && (
+              <PointPanel
+                point={selectedPoint}
+                onClose={() => setSelectedPoint(null)}
+                onCheckin={() => doCheckin(selectedPoint)}
+                user={user}
+                userPos={userPos}
+                profiles={profiles}
+                clans={clans}
+                battles={battles}
+                profile={profile}
+                onInvite={inviteToClan}
+              />
+            )}
+
+            {/* Selected war zone panel */}
+            {selectedZone && (
+              <WarZonePanel
+                zone={selectedZone}
+                onClose={() => setSelectedZone(null)}
+                user={user}
+                userPos={userPos}
+                db={db}
+                profile={profile}
+                profiles={profiles}
+                clans={clans}
+              />
+            )}
+          </div>
+        )}
+
+        {/* ── RANKING TAB ── */}
+        {tab === 'ranking' && <RankingView profiles={profiles} points={points} clans={clans} season={season} user={user} />}
+
+        {/* ── CLAN TAB ── */}
+        {tab === 'clan' && (
+          <ClanView
+            user={user}
+            profile={profile}
+            clans={clans}
+            myClan={myClan}
+            profiles={profiles}
+            clanInvites={clanInvites}
+            clanForm={clanForm}
+            setClanForm={setClanForm}
+            showCreateClan={showCreateClan}
+            setShowCreateClan={setShowCreateClan}
+            onCreateClan={createClan}
+            onLeaveClan={leaveClan}
+            onRespondInvite={respondInvite}
+            onInvite={inviteToClan}
+            points={points}
+          />
+        )}
+
+        {/* ── PROFILE TAB ── */}
+        {tab === 'profile' && (
+          <ProfileView
+            user={user}
+            profile={profile}
+            setProfile={setProfile}
+            db={db}
+            myPoints={myPoints}
+            level={level}
+            myClan={myClan}
+            myRivalry={myRivalry}
+            profiles={profiles}
+            rivalries={rivalries}
+            onSignOut={() => signOut(auth)}
+            season={season}
+            onCreateSeason={createSeason}
+          />
+        )}
+
+        {/* ── NOTIFICATIONS TAB ── */}
+        {tab === 'notifications' && (
+          <NotificationsView
+            notifications={notifications}
+            onMarkRead={markNotifRead}
+            onMarkAll={() => notifications.forEach(n => markNotifRead(n.id))}
+          />
+        )}
+      </div>
+
+      {/* BOTTOM NAV */}
+      <nav style={{ background: '#fff', borderTop: '1px solid #e2e8f0', display: 'flex', flexShrink: 0 }}>
+        {[
+          { id: 'map', icon: '🗺', label: 'Mapa' },
+          { id: 'ranking', icon: '🏆', label: 'Ranking' },
+          { id: 'clan', icon: '⚔️', label: 'Clans' },
+          { id: 'notifications', icon: '🔔', label: 'Alertas', badge: notifications.length },
+          { id: 'profile', icon: '👤', label: 'Perfil' },
+        ].map(item => (
+          <button key={item.id} onClick={() => setTab(item.id)} style={{ flex: 1, padding: '10px 4px 6px', background: 'none', border: 'none', cursor: 'pointer', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, position: 'relative' }}>
+            <span style={{ fontSize: 20 }}>{item.icon}</span>
+            <span style={{ fontSize: 9, color: tab === item.id ? '#ef4444' : '#94a3b8', fontWeight: tab === item.id ? 700 : 400 }}>{item.label}</span>
+            {tab === item.id && <div style={{ position: 'absolute', top: 0, left: '50%', transform: 'translateX(-50%)', width: 24, height: 2, background: '#ef4444', borderRadius: 1 }} />}
+            {item.badge > 0 && <div style={{ position: 'absolute', top: 6, right: '50%', marginRight: -18, background: '#ef4444', color: '#fff', fontSize: 8, fontWeight: 700, borderRadius: '50%', width: 13, height: 13, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{item.badge}</div>}
           </button>
-          {err&&<div style={{fontSize:11,color:'#dc2626',marginTop:4}}>{err}</div>}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Checkin ───────────────────────────────────────────────────
-const Checkin=({point,geo,user,onResult})=>{
-  const[loading,setLoading]=useState(false)
-  const[done,setDone]=useState(false)
-  if(!point)return null
-  const dist=geo.lat?hav(geo.lat,geo.lng,point.lat,point.lng):null
-  const within=dist!==null&&dist<=point.radius_m
-  const run=async()=>{
-    if(!within||loading||done)return
-    setLoading(true)
-    try{
-      await addDoc(collection(db,'checkins'),{user_id:user.uid,point_id:point.id,lat:geo.lat,lng:geo.lng,dist_m:dist,created_at:serverTimestamp()})
-      await updateDoc(doc(db,'profiles',user.uid),{checkins:(user.checkins||0)+1})
-      if(!point.owner_id){
-        await updateDoc(doc(db,'conquest_points',point.id),{owner_id:user.uid,owner_name:user.display_name,owner_color:user.avatar_color,owner_km:user.km_total||0,conquered_at:serverTimestamp()})
-        await updateDoc(doc(db,'profiles',user.uid),{points:(user.points||0)+100})
-        onResult({ok:true,action:'conquered',dist,pts:100})
-      }else{onResult({ok:true,action:'checkin',dist,pts:0})}
-      setDone(true);setTimeout(()=>setDone(false),60000)
-    }catch(e){onResult({ok:false,error:e.message})}
-    setLoading(false)
-  }
-  const c=within?'#059669':'#94a3b8'
-  return(
-    <div style={{padding:'0 18px',marginBottom:14}}>
-      {dist!==null&&<>
-        <div style={{display:'flex',justifyContent:'space-between',marginBottom:6}}>
-          <span style={{fontSize:11,color:within?'#059669':'#dc2626',fontWeight:600}}><I n="pin" s={12} c={within?'#059669':'#dc2626'}/> {fmtD(dist)} de distância</span>
-          <span style={{fontSize:10,color:'#94a3b8'}}>raio {fmtD(point.radius_m)}</span>
-        </div>
-        <div style={{height:4,background:'#f1f5f9',borderRadius:2,marginBottom:10,overflow:'hidden'}}>
-          <div style={{height:'100%',width:`${Math.min(100,(dist/point.radius_m)*100)}%`,background:within?'#059669':'#dc2626',transition:'width 0.4s'}}/>
-        </div>
-      </>}
-      <button onClick={run} disabled={!within||loading||done} style={{width:'100%',padding:'12px',borderRadius:12,border:'none',background:within?'#059669':'#f1f5f9',color:within?'#fff':'#94a3b8',cursor:within&&!loading&&!done?'pointer':'not-allowed',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
-        {loading?'Registrando...':done?'✓ Check-in feito':within?<><I n="pin" s={14} c="#fff"/>Fazer Check-in</>:<><I n="nav" s={14}/>Muito longe</>}
-      </button>
-      {!within&&dist!==null&&<p style={{fontSize:11,color:'#94a3b8',textAlign:'center',marginTop:6}}>Chegue {fmtD(Math.max(0,dist-point.radius_m))} mais perto</p>}
-    </div>
-  )
-}
-
-// ── Territory Panel ───────────────────────────────────────────
-const Panel=({point,geo,user,battles,profiles,onBattle,onCheckin,onClose,onEdit})=>{
-  if(!point)return null
-  const p=point.owner_id?profiles[point.owner_id]:null
-  const ownerName=p?.display_name||point.owner_name||'?'
-  const color=p?.avatar_color||point.owner_color||(point.owner_id?'#4f46e5':'#94a3b8')
-  const battle=battles.find(b=>b.conquest_point_id===point.id&&b.status==='active')
-  const isOwner=user&&point.owner_id===user.uid
-  return(
-    <div style={{position:'absolute',top:0,right:0,width:290,height:'100%',background:'#fff',borderLeft:'1px solid #e2e8f0',display:'flex',flexDirection:'column',zIndex:1000,overflowY:'auto',boxShadow:'-4px 0 20px rgba(0,0,0,0.08)'}}>
-      <div style={{padding:'18px 18px 12px',borderBottom:'1px solid #f1f5f9'}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
-          <div style={{flex:1}}>
-            <span style={{fontSize:10,fontWeight:700,color:TC[point.type]||'#64748b',background:TB[point.type]||'#f8fafc',padding:'3px 8px',borderRadius:20}}>{TL[point.type]||point.type}</span>
-            <div style={{fontSize:20,fontWeight:900,color:'#0f172a',marginTop:8}}>{point.name}</div>
-            {point.city&&<div style={{fontSize:11,color:'#94a3b8',marginTop:2}}>{point.city}</div>}
-          </div>
-          <div style={{display:'flex',gap:6}}>
-            {user?.is_admin&&<button onClick={()=>onEdit(point)} style={{background:'#eef2ff',border:'none',borderRadius:8,padding:8,cursor:'pointer'}}><I n="edit" s={15} c="#4f46e5"/></button>}
-            <button onClick={onClose} style={{background:'#f1f5f9',border:'none',borderRadius:8,padding:8,cursor:'pointer'}}><I n="x" s={15} c="#64748b"/></button>
-          </div>
-        </div>
-        <div style={{marginTop:12,display:'flex',alignItems:'center',gap:10}}>
-          {point.owner_id?<>
-            {p?.photo_url?<img src={p.photo_url} style={{width:40,height:40,borderRadius:'50%',objectFit:'cover',flexShrink:0}} alt=""/>:<div style={{width:40,height:40,borderRadius:'50%',background:color,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:18,color:'#fff',flexShrink:0}}>{ownerName.charAt(0)}</div>}
-            <div><div style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{ownerName}</div><div style={{fontSize:11,color:'#64748b'}}>{point.owner_km?.toFixed(0)||0} km acumulados</div></div>
-          </>:<div style={{display:'flex',alignItems:'center',gap:8,color:'#64748b',background:'#f8fafc',borderRadius:10,padding:'10px 14px',width:'100%'}}><I n="flag" s={18}/><span style={{fontSize:13,fontWeight:600}}>Território livre — conquiste!</span></div>}
-        </div>
-      </div>
-      {battle&&<div style={{margin:'12px 18px 0',background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:12}}>
-        <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:4}}><I n="sword" s={14} c="#dc2626"/><span style={{fontSize:12,color:'#dc2626',fontWeight:700}}>BATALHA ATIVA</span></div>
-        <div style={{fontSize:12,color:'#64748b'}}>Termina em {fmtT(Math.max(0,(battle.ends_at?.toDate?.()?.getTime()||battle.ends_at)-Date.now()))}</div>
-      </div>}
-      <div style={{padding:'12px 18px',display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
-        {[['Pontos',point.base_points],['Raio',fmtD(point.radius_m)]].map(([l,v])=>(
-          <div key={l} style={{background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,padding:'10px 12px'}}>
-            <div style={{fontSize:10,color:'#94a3b8',marginBottom:2,fontWeight:600}}>{l}</div>
-            <div style={{fontSize:18,fontWeight:900,color:'#4f46e5'}}>{v}</div>
-          </div>
         ))}
-      </div>
-      <Checkin point={point} geo={geo} user={user} onResult={onCheckin}/>
-      {!isOwner&&point.owner_id&&!battle&&<div style={{padding:'0 18px',marginBottom:12}}>
-        <button onClick={()=>onBattle(point)} style={{width:'100%',padding:'12px',borderRadius:12,border:'none',background:'#dc2626',color:'#fff',cursor:'pointer',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
-          <I n="sword" s={14} c="#fff"/> Iniciar batalha
-        </button>
-      </div>}
-      {isOwner&&battle&&<div style={{padding:'0 18px',marginBottom:12}}>
-        <button style={{width:'100%',padding:'12px',borderRadius:12,border:'none',background:'#d97706',color:'#fff',cursor:'pointer',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
-          <I n="shield" s={14} c="#fff"/> Chamar reforços
-        </button>
-      </div>}
-    </div>
-  )
-}
+      </nav>
 
-// ── Point Form (Add/Edit ADM) ─────────────────────────────────
-const PointForm=({lat,lng,initial,onSave,onCancel,onDelete})=>{
-  const[name,setName]=useState(initial?.name||'')
-  const[type,setType]=useState(initial?.type||'BAIRRO')
-  const[radius,setRadius]=useState(String(initial?.radius_m||300))
-  const[confirmDel,setConfirmDel]=useState(false)
-  const s={width:'100%',padding:'11px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:13,outline:'none',marginBottom:10}
-  const isEdit=!!initial
-  return(
-    <div style={{background:'#fff',borderRadius:20,padding:28,width:320,boxShadow:'0 20px 60px rgba(0,0,0,0.15)',maxHeight:'90vh',overflowY:'auto'}}>
-      <div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:4}}>{isEdit?'EDITAR PONTO':'NOVO PONTO'}</div>
-      <div style={{fontSize:18,fontWeight:900,color:'#0f172a',marginBottom:16}}>{isEdit?name:'Adicionar Conquista'}</div>
-      {!isEdit&&<div style={{fontSize:11,color:'#94a3b8',marginBottom:14,background:'#f8fafc',padding:'8px 12px',borderRadius:8}}>📍 {lat?.toFixed(5)}, {lng?.toFixed(5)}</div>}
-      <input style={s} placeholder="Nome do ponto" value={name} onChange={e=>setName(e.target.value)}/>
-      <select style={{...s,cursor:'pointer'}} value={type} onChange={e=>setType(e.target.value)}>
-        {[['QUARTEIRAO','QUARTEIRÃO'],['BAIRRO','BAIRRO'],['AREA','ÁREA'],['CIDADE','CIDADE']].map(([v,l])=><option key={v} value={v}>{l}</option>)}
-      </select>
-      <div style={{marginBottom:16}}>
-        <div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:'#64748b',marginBottom:8}}>
-          <span>Raio</span><span style={{color:'#4f46e5',fontWeight:700}}>{fmtD(parseInt(radius)||0)}</span>
+      {/* TOAST */}
+      {toast && (
+        <div style={{ position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)', background: toast.type === 'err' ? '#fee2e2' : toast.type === 'ok' ? '#dcfce7' : '#f0f9ff', border: `1px solid ${toast.type === 'err' ? '#fca5a5' : toast.type === 'ok' ? '#86efac' : '#bae6fd'}`, color: toast.type === 'err' ? '#991b1b' : toast.type === 'ok' ? '#166534' : '#0c4a6e', borderRadius: 12, padding: '10px 20px', zIndex: 9999, fontSize: 13, fontWeight: 600, boxShadow: '0 4px 16px rgba(0,0,0,0.12)', whiteSpace: 'nowrap' }}>
+          {toast.msg}
         </div>
-        <input type="range" min="50" max="3000" step="50" value={radius} onChange={e=>setRadius(e.target.value)} style={{width:'100%',accentColor:'#4f46e5'}}/>
-      </div>
-      <div style={{display:'flex',gap:10,marginBottom:isEdit?10:0}}>
-        <button onClick={onCancel} style={{flex:1,padding:'11px',borderRadius:10,background:'#f1f5f9',border:'none',color:'#64748b',cursor:'pointer',fontWeight:700}}>Cancelar</button>
-        <button onClick={()=>name.trim()&&onSave({name,type,radius})} disabled={!name.trim()} style={{flex:2,padding:'11px',borderRadius:10,background:name.trim()?'#4f46e5':'#c7d2fe',border:'none',color:'#fff',cursor:name.trim()?'pointer':'not-allowed',fontWeight:900}}>
-          {isEdit?'Salvar':'Criar ponto'}
-        </button>
-      </div>
-      {isEdit&&(confirmDel?
-        <div style={{background:'#fef2f2',border:'1px solid #fecaca',borderRadius:10,padding:12,marginTop:4}}>
-          <div style={{fontSize:13,color:'#dc2626',fontWeight:700,marginBottom:8}}>Confirmar exclusão?</div>
-          <div style={{display:'flex',gap:8}}>
-            <button onClick={()=>setConfirmDel(false)} style={{flex:1,padding:'9px',borderRadius:8,background:'#f1f5f9',border:'none',cursor:'pointer',fontWeight:700,color:'#64748b'}}>Não</button>
-            <button onClick={onDelete} style={{flex:1,padding:'9px',borderRadius:8,background:'#dc2626',border:'none',cursor:'pointer',fontWeight:900,color:'#fff'}}>Apagar</button>
-          </div>
-        </div>:
-        <button onClick={()=>setConfirmDel(true)} style={{width:'100%',marginTop:4,padding:'10px',borderRadius:10,background:'transparent',border:'1px solid #fecaca',color:'#dc2626',cursor:'pointer',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',justifyContent:'center',gap:8}}>
-          <I n="trash" s={14} c="#dc2626"/> Apagar ponto
-        </button>
       )}
     </div>
   )
 }
 
-// ── Profile View ──────────────────────────────────────────────
-const ProfileView=({user,points,onUpdate})=>{
-  const[editing,setEditing]=useState(false)
-  const[form,setForm]=useState({display_name:user.display_name||'',bio:user.bio||'',age:user.age||'',city:user.city||'',photo_url:user.photo_url||''})
-  const[saving,setSaving]=useState(false)
-  const myPoints=points.filter(p=>p.owner_id===user.uid)
+// ══════════════════════════════════════════════════════════════════════════════
+// POINT PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+function PointPanel({ point, onClose, onCheckin, user, userPos, profiles, clans, battles, profile, onInvite }) {
+  const strength = getStrength(point)
+  const dist = userPos ? Math.round(calcDistance(userPos.lat, userPos.lng, point.lat, point.lng)) : null
+  const inRange = dist !== null && dist <= CHECKIN_RADIUS_M
+  const ownerProfile = point.owner_id ? profiles[point.owner_id] : null
+  const ownerClan = ownerProfile?.clan_id ? clans.find(c => c.id === ownerProfile.clan_id) : null
+  const battle = battles.find(b => b.point_id === point.id)
+  const daysAgo = point.last_checkin ? Math.round((Date.now() - point.last_checkin.toDate().getTime()) / 86400000) : null
 
-  const save=async()=>{
-    setSaving(true)
-    await updateDoc(doc(db,'profiles',user.uid),{...form,updated_at:serverTimestamp()})
-    onUpdate({...user,...form})
-    setSaving(false);setEditing(false)
-  }
-
-  const inp={width:'100%',padding:'10px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:13,outline:'none',marginBottom:10}
-
-  return(
-    <div style={{overflowY:'auto',height:'100%',background:'#f8fafc'}}>
-      {/* Banner + Avatar */}
-      <div style={{position:'relative',marginBottom:50}}>
-        <div style={{height:100,background:`linear-gradient(135deg,${user.avatar_color||'#4f46e5'},${user.avatar_color||'#7c3aed'})`,overflow:'hidden'}}>
-          <div style={{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:70,opacity:0.12}}>⚔️</div>
-        </div>
-        <div style={{position:'absolute',bottom:-40,left:20}}>
-          <div style={{width:80,height:80,borderRadius:'50%',overflow:'hidden',border:'4px solid #f8fafc',boxShadow:'0 4px 16px rgba(0,0,0,0.2)',background:user.avatar_color||'#4f46e5'}}>
-            {form.photo_url?<img src={form.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:32,color:'#fff'}}>{user.display_name?.charAt(0)||'?'}</div>}
-          </div>
-        </div>
-        <div style={{position:'absolute',bottom:-36,right:20}}>
-          <button onClick={()=>setEditing(!editing)} style={{padding:'8px 16px',borderRadius:10,border:`1px solid ${editing?'#dc2626':'#e2e8f0'}`,background:editing?'#fef2f2':'#fff',color:editing?'#dc2626':'#64748b',cursor:'pointer',fontWeight:700,fontSize:12,display:'flex',alignItems:'center',gap:6}}>
-            <I n={editing?'x':'edit'} s={14} c={editing?'#dc2626':'#64748b'}/>{editing?'Cancelar':'Editar'}
-          </button>
-        </div>
-      </div>
-      <div style={{padding:'0 20px 24px'}}>
-
-        {editing?(
-          <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:20,marginBottom:16}}>
-            <PhotoUpload currentUrl={form.photo_url} onUploaded={url=>setForm(f=>({...f,photo_url:url}))}/>
-            <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:4}}>Nome</label>
-            <input style={inp} value={form.display_name} onChange={e=>setForm(f=>({...f,display_name:e.target.value}))} placeholder="Seu nome"/>
-            <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:4}}>Bio</label>
-            <textarea style={{...inp,resize:'none',height:72,fontFamily:'inherit'}} value={form.bio} onChange={e=>setForm(f=>({...f,bio:e.target.value}))} placeholder="Fale sobre você..."/>
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:10}}>
-              <div>
-                <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:4}}>Idade</label>
-                <input style={{...inp,marginBottom:0}} type="number" value={form.age} onChange={e=>setForm(f=>({...f,age:e.target.value}))} placeholder="25"/>
-              </div>
-              <div>
-                <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:4}}>Cidade</label>
-                <input style={{...inp,marginBottom:0}} value={form.city} onChange={e=>setForm(f=>({...f,city:e.target.value}))} placeholder="São Paulo"/>
-              </div>
-            </div>
-            <button onClick={save} disabled={saving} style={{width:'100%',marginTop:6,padding:'12px',borderRadius:12,border:'none',background:saving?'#c7d2fe':'#4f46e5',color:'#fff',fontWeight:900,cursor:saving?'wait':'pointer',fontSize:13}}>
-              {saving?'Salvando...':'Salvar perfil'}
-            </button>
-          </div>
-        ):(
-          <div style={{marginBottom:16}}>
-            <div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>{user.display_name}</div>
-            {user.username&&<div style={{fontSize:13,color:'#94a3b8'}}>{user.username}</div>}
-            {(user.age||user.city)&&<div style={{fontSize:13,color:'#64748b',marginTop:4}}>{user.age?`${user.age} anos`:''}{user.age&&user.city?' · ':''}{user.city||''}</div>}
-            {user.bio&&<div style={{fontSize:13,color:'#475569',marginTop:8,lineHeight:1.6}}>{user.bio}</div>}
-            {user.is_admin&&<span style={{fontSize:10,fontWeight:700,color:'#4f46e5',background:'#eef2ff',padding:'3px 10px',borderRadius:20,marginTop:8,display:'inline-block'}}>ADM</span>}
-          </div>
-        )}
-
-        <div style={{marginBottom:16}}><LevelBar km={user.km_total||0}/></div>
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10,marginBottom:20}}>
-          {[['🏃',`${(user.km_total||0).toFixed(1)}km`,'KMs'],['⚑',myPoints.length,'Territórios'],['⭐',user.points||0,'Pontos']].map(([ic,v,l])=>(
-            <div key={l} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:'14px 10px',textAlign:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
-              <div style={{fontSize:20,marginBottom:4}}>{ic}</div>
-              <div style={{fontSize:18,fontWeight:900,color:'#4f46e5'}}>{v}</div>
-              <div style={{fontSize:10,color:'#94a3b8',fontWeight:600}}>{l}</div>
-            </div>
-          ))}
-        </div>
-
-        {myPoints.length>0&&<>
-          <div style={{fontSize:12,fontWeight:700,color:'#64748b',letterSpacing:1,marginBottom:12}}>TERRITÓRIOS DOMINADOS</div>
-          {myPoints.map(p=>(
-            <div key={p.id} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:12,padding:'12px 16px',marginBottom:8,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-              <div>
-                <span style={{fontSize:10,fontWeight:700,color:TC[p.type]||'#64748b',background:TB[p.type]||'#f8fafc',padding:'2px 8px',borderRadius:20}}>{TL[p.type]||p.type}</span>
-                <div style={{fontSize:14,fontWeight:700,color:'#0f172a',marginTop:4}}>{p.name}</div>
-                {p.city&&<div style={{fontSize:11,color:'#94a3b8'}}>{p.city}</div>}
-              </div>
-              <div style={{fontSize:12,color:'#4f46e5',fontWeight:700}}>{p.base_points} pts</div>
-            </div>
-          ))}
-        </>}
-      </div>
-    </div>
-  )
-}
-
-// ── Forum ────────────────────────────────────────────────────
-const ForumView=({user})=>{
-  const[posts,setPosts]=useState([])
-  const[openPost,setOpenPost]=useState(null)
-  const[comments,setComments]=useState([])
-  const[newTitle,setNewTitle]=useState('')
-  const[newBody,setNewBody]=useState('')
-  const[newComment,setNewComment]=useState('')
-  const[showNew,setShowNew]=useState(false)
-  const[posting,setPosting]=useState(false)
-  const[sendingComment,setSendingComment]=useState(false)
-  const commentsEndRef=useRef(null)
-
-  useEffect(()=>onSnapshot(
-    query(collection(db,'forum_posts'),orderBy('created_at','desc')),
-    s=>setPosts(s.docs.map(d=>({id:d.id,...d.data()})))
-  ),[])
-
-  useEffect(()=>{
-    if(!openPost)return
-    return onSnapshot(
-      query(collection(db,'forum_posts',openPost.id,'comments'),orderBy('created_at','asc')),
-      s=>{setComments(s.docs.map(d=>({id:d.id,...d.data()})));setTimeout(()=>commentsEndRef.current?.scrollIntoView({behavior:'smooth'}),100)}
-    )
-  },[openPost?.id])
-
-  const submitPost=async()=>{
-    if(!newTitle.trim()||!newBody.trim()||posting)return
-    setPosting(true)
-    await addDoc(collection(db,'forum_posts'),{
-      title:newTitle.trim(),body:newBody.trim(),
-      author_id:user.uid,author_name:user.display_name,
-      author_color:user.avatar_color,author_photo:user.photo_url||null,
-      likes:[],comment_count:0,created_at:serverTimestamp()
-    })
-    setNewTitle('');setNewBody('');setShowNew(false);setPosting(false)
-  }
-
-  const submitComment=async()=>{
-    if(!newComment.trim()||!openPost||sendingComment)return
-    setSendingComment(true)
-    await addDoc(collection(db,'forum_posts',openPost.id,'comments'),{
-      body:newComment.trim(),
-      author_id:user.uid,author_name:user.display_name,
-      author_color:user.avatar_color,author_photo:user.photo_url||null,
-      created_at:serverTimestamp()
-    })
-    await updateDoc(doc(db,'forum_posts',openPost.id),{comment_count:(openPost.comment_count||0)+1})
-    setNewComment('')
-    setSendingComment(false)
-  }
-
-  const toggleLike=async(post,e)=>{
-    e?.stopPropagation()
-    const likes=post.likes||[],has=likes.includes(user.uid)
-    await updateDoc(doc(db,'forum_posts',post.id),{likes:has?likes.filter(x=>x!==user.uid):[...likes,user.uid]})
-  }
-
-  const Avatar=({photo,color,name,size=36})=>(
-    <div style={{width:size,height:size,borderRadius:'50%',overflow:'hidden',flexShrink:0,background:color||'#4f46e5'}}>
-      {photo
-        ?<img src={photo} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>
-        :<div style={{width:'100%',height:'100%',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,color:'#fff',fontSize:size*0.44}}>{name?.charAt(0)||'?'}</div>
-      }
-    </div>
-  )
-
-  // ── Open post view ─────────────────────────────────────────
-  if(openPost)return(
-    <div style={{display:'flex',flexDirection:'column',height:'100%',background:'#f8fafc'}}>
-      {/* Header */}
-      <div style={{padding:'12px 16px',background:'#fff',borderBottom:'1px solid #e2e8f0',display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
-        <button onClick={()=>{setOpenPost(null);setComments([])}} style={{background:'#f1f5f9',border:'none',borderRadius:8,padding:'7px 12px',cursor:'pointer',fontWeight:700,color:'#64748b',fontSize:13,display:'flex',alignItems:'center',gap:6}}>
-          <I n="x" s={14} c="#64748b"/> Fechar
-        </button>
-        <div style={{fontSize:14,fontWeight:900,color:'#0f172a',flex:1,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{openPost.title}</div>
-      </div>
-
-      {/* Scrollable content */}
-      <div style={{flex:1,overflowY:'auto',padding:'16px'}}>
-        {/* Original post card */}
-        <div style={{background:'#fff',borderRadius:16,padding:18,marginBottom:20,border:'1px solid #e2e8f0',boxShadow:'0 1px 4px rgba(0,0,0,0.05)'}}>
-          <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:12}}>
-            <Avatar photo={openPost.author_photo} color={openPost.author_color} name={openPost.author_name}/>
-            <div>
-              <div style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{openPost.author_name}</div>
-              <div style={{fontSize:11,color:'#94a3b8'}}>{fmtDate(openPost.created_at)}</div>
-            </div>
-          </div>
-          <div style={{fontSize:15,fontWeight:700,color:'#0f172a',marginBottom:8}}>{openPost.title}</div>
-          <div style={{fontSize:14,color:'#334155',lineHeight:1.7,marginBottom:14}}>{openPost.body}</div>
-          <button onClick={e=>toggleLike(openPost,e)} style={{background:'transparent',border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:6,fontSize:13,color:(openPost.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8',fontWeight:600,padding:0}}>
-            <I n="heart" s={16} c={(openPost.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8'}/>
-            {(openPost.likes||[]).length} curtidas
-          </button>
-        </div>
-
-        {/* Comments header */}
-        <div style={{fontSize:12,fontWeight:700,color:'#64748b',letterSpacing:1,marginBottom:12,paddingLeft:4}}>
-          {comments.length} {comments.length===1?'COMENTÁRIO':'COMENTÁRIOS'}
-        </div>
-
-        {/* Comments list */}
-        {comments.length===0&&(
-          <div style={{textAlign:'center',padding:'20px 0',color:'#94a3b8',fontSize:13}}>
-            Nenhum comentário ainda. Seja o primeiro! 👇
-          </div>
-        )}
-        {comments.map(c=>(
-          <div key={c.id} style={{display:'flex',gap:10,marginBottom:14,alignItems:'flex-start'}}>
-            <Avatar photo={c.author_photo} color={c.author_color} name={c.author_name} size={34}/>
-            <div style={{flex:1}}>
-              <div style={{background:'#fff',borderRadius:14,borderTopLeftRadius:4,padding:'10px 14px',border:'1px solid #e2e8f0'}}>
-                <div style={{fontSize:12,fontWeight:700,color:'#0f172a',marginBottom:4}}>{c.author_name}</div>
-                <div style={{fontSize:13,color:'#334155',lineHeight:1.6}}>{c.body}</div>
-              </div>
-              <div style={{fontSize:10,color:'#94a3b8',marginTop:4,paddingLeft:4}}>{fmtDate(c.created_at)}</div>
-            </div>
-          </div>
-        ))}
-        <div ref={commentsEndRef}/>
-      </div>
-
-      {/* Comment input — always visible at bottom */}
-      <div style={{background:'#fff',borderTop:'1px solid #e2e8f0',padding:'10px 16px',flexShrink:0}}>
-        <div style={{display:'flex',gap:10,alignItems:'flex-end'}}>
-          <Avatar photo={user.photo_url} color={user.avatar_color} name={user.display_name} size={36}/>
-          <div style={{flex:1,background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:20,display:'flex',alignItems:'center',overflow:'hidden',paddingLeft:14}}>
-            <input
-              value={newComment}
-              onChange={e=>setNewComment(e.target.value)}
-              onKeyDown={e=>e.key==='Enter'&&!e.shiftKey&&submitComment()}
-              placeholder="Escreva um comentário..."
-              style={{flex:1,border:'none',background:'transparent',outline:'none',fontSize:14,color:'#0f172a',padding:'10px 0'}}
-            />
-            <button
-              onClick={submitComment}
-              disabled={!newComment.trim()||sendingComment}
-              style={{background:newComment.trim()?'#4f46e5':'transparent',border:'none',borderRadius:20,margin:4,padding:'8px 14px',cursor:newComment.trim()?'pointer':'default',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.2s'}}
-            >
-              <I n="send" s={16} c={newComment.trim()?'#fff':'#cbd5e1'}/>
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-
-  // ── Posts list ─────────────────────────────────────────────
-  return(
-    <div style={{display:'flex',flexDirection:'column',height:'100%',background:'#f8fafc'}}>
-      {/* Header */}
-      <div style={{padding:'20px 20px 12px',background:'#f8fafc',flexShrink:0}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-          <div>
-            <div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:2}}>COMUNIDADE</div>
-            <div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>Fórum</div>
-          </div>
-          <button onClick={()=>setShowNew(!showNew)} style={{padding:'9px 16px',borderRadius:12,border:'none',background:'#4f46e5',color:'#fff',cursor:'pointer',fontWeight:700,fontSize:13,display:'flex',alignItems:'center',gap:6}}>
-            <I n="plus" s={14} c="#fff"/>{showNew?'Cancelar':'Novo post'}
-          </button>
-        </div>
-
-        {/* New post form */}
-        {showNew&&(
-          <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:18,marginTop:14}}>
-            <div style={{display:'flex',gap:10,marginBottom:12,alignItems:'center'}}>
-              <Avatar photo={user.photo_url} color={user.avatar_color} name={user.display_name} size={36}/>
-              <div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{user.display_name}</div>
-            </div>
-            <input
-              style={{width:'100%',padding:'10px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:14,outline:'none',marginBottom:10,fontWeight:600}}
-              placeholder="Título do post"
-              value={newTitle}
-              onChange={e=>setNewTitle(e.target.value)}
-            />
-            <textarea
-              style={{width:'100%',padding:'10px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:13,outline:'none',resize:'none',height:80,fontFamily:'inherit',display:'block'}}
-              placeholder="Escreva sua mensagem..."
-              value={newBody}
-              onChange={e=>setNewBody(e.target.value)}
-            />
-            <div style={{display:'flex',gap:8,marginTop:12}}>
-              <button onClick={()=>{setShowNew(false);setNewTitle('');setNewBody('')}} style={{flex:1,padding:'10px',borderRadius:10,background:'#f1f5f9',border:'none',color:'#64748b',cursor:'pointer',fontWeight:700}}>Cancelar</button>
-              <button onClick={submitPost} disabled={posting||!newTitle.trim()||!newBody.trim()} style={{flex:2,padding:'10px',borderRadius:10,background:newTitle.trim()&&newBody.trim()?'#4f46e5':'#c7d2fe',border:'none',color:'#fff',cursor:'pointer',fontWeight:900}}>
-                {posting?'Publicando...':'Publicar'}
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Posts */}
-      <div style={{flex:1,overflowY:'auto',padding:'0 16px 24px'}}>
-        {posts.length===0&&<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:40}}>Nenhum post ainda. Seja o primeiro!</div>}
-        {posts.map(p=>(
-          <div key={p.id} onClick={()=>setOpenPost(p)} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:16,marginBottom:12,cursor:'pointer',boxShadow:'0 1px 4px rgba(0,0,0,0.05)',active:{background:'#f8fafc'}}}>
-            {/* Author */}
-            <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:10}}>
-              <Avatar photo={p.author_photo} color={p.author_color} name={p.author_name}/>
-              <div style={{flex:1,minWidth:0}}>
-                <div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{p.author_name}</div>
-                <div style={{fontSize:11,color:'#94a3b8'}}>{fmtDate(p.created_at)}</div>
-              </div>
-            </div>
-            {/* Content */}
-            <div style={{fontSize:15,fontWeight:700,color:'#0f172a',marginBottom:6}}>{p.title}</div>
-            <div style={{fontSize:13,color:'#64748b',lineHeight:1.5,display:'-webkit-box',WebkitLineClamp:3,WebkitBoxOrient:'vertical',overflow:'hidden'}}>{p.body}</div>
-            {/* Footer */}
-            <div style={{display:'flex',gap:16,marginTop:12,paddingTop:12,borderTop:'1px solid #f1f5f9',fontSize:13}}>
-              <button
-                onClick={e=>toggleLike(p,e)}
-                style={{background:'transparent',border:'none',cursor:'pointer',display:'flex',alignItems:'center',gap:5,color:(p.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8',fontWeight:600,padding:0,fontSize:13}}
-              >
-                <I n="heart" s={15} c={(p.likes||[]).includes(user.uid)?'#dc2626':'#94a3b8'}/>{(p.likes||[]).length}
-              </button>
-              <span style={{display:'flex',alignItems:'center',gap:5,color:'#94a3b8'}}>
-                <I n="msg" s={15} c="#94a3b8"/>{p.comment_count||0} comentários
-              </span>
-              <span style={{marginLeft:'auto',color:'#4f46e5',fontWeight:700,fontSize:12}}>Ver →</span>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-
-
-// ── Notification History ──────────────────────────────────────
-const NotifHistory=()=>{
-  const[notifs,setNotifs]=useState([])
-  useEffect(()=>onSnapshot(
-    query(collection(db,'notifications'),orderBy('created_at','desc')),
-    s=>setNotifs(s.docs.map(d=>({id:d.id,...d.data()})))
-  ),[])
-  if(!notifs.length)return<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:16}}>Nenhum comunicado enviado ainda.</div>
-  return(<div>
-    <div style={{fontSize:12,fontWeight:700,color:'#64748b',letterSpacing:1,marginBottom:10}}>HISTORICO</div>
-    {notifs.map(n=>(
-      <div key={n.id} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:12,padding:14,marginBottom:10}}>
-        <div style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:4}}>{n.title}</div>
-        <div style={{fontSize:13,color:'#64748b',lineHeight:1.5,marginBottom:8}}>{n.message}</div>
-        <div style={{fontSize:11,color:'#94a3b8'}}>Por {n.from} · {n.created_at?.toDate?.()?.toLocaleDateString('pt-BR')||''}</div>
-      </div>
-    ))}
-  </div>)
-}
-
-
-
-// ── Level Bar Component ───────────────────────────────────────
-const LevelBar=({km,size='normal'})=>{
-  const lvl=calcLevel(km||0)
-  const cur=kmForLevel(lvl)
-  const next=kmForLevel(lvl+1)
-  const pct=lvl>=100?100:Math.min(100,((km-cur)/(next-cur))*100)
-  const emblem=getLevelEmblem(lvl)
-  const title=getLevelTitle(lvl)
-  if(size==='small')return(
-    <div style={{display:'flex',alignItems:'center',gap:6}}>
-      <span style={{fontSize:16}}>{emblem}</span>
-      <div>
-        <div style={{fontSize:10,fontWeight:700,color:'#4f46e5'}}>Nv.{lvl} · {title}</div>
-        <div style={{height:3,width:60,background:'#e2e8f0',borderRadius:2,overflow:'hidden'}}>
-          <div style={{height:'100%',width:pct+'%',background:'#4f46e5',borderRadius:2}}/>
-        </div>
-      </div>
-    </div>
-  )
-  return(
-    <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:'14px 16px',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
-      <div style={{display:'flex',alignItems:'center',gap:12,marginBottom:10}}>
-        <div style={{fontSize:36}}>{emblem}</div>
+  return (
+    <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, background: '#fff', borderRadius: '20px 20px 0 0', padding: 20, boxShadow: '0 -4px 32px rgba(0,0,0,0.15)', zIndex: 1000, maxHeight: '60vh', overflowY: 'auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
         <div>
-          <div style={{fontSize:11,fontWeight:700,color:'#94a3b8',letterSpacing:1}}>NÍVEL</div>
-          <div style={{fontSize:28,fontWeight:900,color:'#4f46e5',lineHeight:1}}>{lvl}</div>
-          <div style={{fontSize:12,color:'#64748b',fontWeight:600}}>{title}</div>
+          <div style={{ fontSize: 18, fontWeight: 900, color: '#0f172a' }}>{point.name}</div>
+          <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 2 }}>{point.type === 'neighborhood' ? 'Bairro' : point.type}</div>
         </div>
-        {lvl<100&&<div style={{marginLeft:'auto',textAlign:'right'}}>
-          <div style={{fontSize:10,color:'#94a3b8'}}>próximo nível</div>
-          <div style={{fontSize:12,fontWeight:700,color:'#0f172a'}}>{(next-(km||0)).toFixed(1)} km</div>
-        </div>}
+        <button onClick={onClose} style={{ background: '#f1f5f9', border: 'none', borderRadius: '50%', width: 30, height: 30, cursor: 'pointer', fontSize: 16, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
       </div>
-      <div style={{height:8,background:'#f1f5f9',borderRadius:4,overflow:'hidden',marginBottom:6}}>
-        <div style={{height:'100%',width:pct+'%',background:'linear-gradient(90deg,#4f46e5,#7c3aed)',borderRadius:4,transition:'width 0.5s'}}/>
+
+      {/* Strength bar */}
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+          <span style={{ fontSize: 11, color: '#64748b', fontWeight: 600 }}>FORÇA DO TERRITÓRIO</span>
+          <span style={{ fontSize: 11, fontWeight: 700, color: strength > 60 ? '#22c55e' : strength > 30 ? '#f97316' : '#ef4444' }}>{strength}%</span>
+        </div>
+        <div style={{ background: '#f1f5f9', borderRadius: 4, height: 6, overflow: 'hidden' }}>
+          <div style={{ height: '100%', width: `${strength}%`, background: strength > 60 ? '#22c55e' : strength > 30 ? '#f97316' : '#ef4444', borderRadius: 4, transition: 'width 0.5s' }} />
+        </div>
+        {daysAgo !== null && <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 3 }}>Último check-in: {daysAgo === 0 ? 'hoje' : `${daysAgo}d atrás`}</div>}
       </div>
-      <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:'#94a3b8'}}>
-        <span>{(km||0).toFixed(1)} km</span>
-        {lvl<100&&<span>{next} km</span>}
+
+      {/* Owner */}
+      {point.owner_id ? (
+        <div style={{ background: '#f8fafc', borderRadius: 12, padding: '10px 14px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ width: 36, height: 36, borderRadius: '50%', background: ownerClan?.color || '#6366f1', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 16 }}>
+            {ownerClan?.emoji || '👤'}
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>{point.owner_name}</div>
+            {ownerClan && <div style={{ fontSize: 11, color: ownerClan.color, fontWeight: 600 }}>⚔️ {ownerClan.name}</div>}
+          </div>
+          {point.owner_id !== user?.uid && profile?.clan_id && (
+            <button onClick={() => onInvite(point.owner_id)} style={{ marginLeft: 'auto', padding: '5px 10px', background: '#f0fdf4', border: '1px solid #86efac', borderRadius: 8, fontSize: 11, color: '#166534', cursor: 'pointer' }}>Convidar para clan</button>
+          )}
+        </div>
+      ) : (
+        <div style={{ background: '#f0fdf4', borderRadius: 12, padding: '10px 14px', marginBottom: 12, fontSize: 13, color: '#166534', fontWeight: 600 }}>
+          🟢 Território livre — seja o primeiro a conquistar!
+        </div>
+      )}
+
+      {/* Battle indicator */}
+      {battle && (
+        <div style={{ background: '#fef2f2', borderRadius: 12, padding: '10px 14px', marginBottom: 12, border: '1px solid #fecaca' }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: '#ef4444', marginBottom: 4 }}>⚔️ BATALHA EM ANDAMENTO</div>
+          <div style={{ fontSize: 11, color: '#64748b' }}>Atacante: {profiles[battle.attacker_id]?.display_name}</div>
+        </div>
+      )}
+
+      {/* Distance */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 14 }}>
+        <div style={{ width: 8, height: 8, borderRadius: '50%', background: inRange ? '#22c55e' : '#f97316' }} />
+        <span style={{ fontSize: 12, color: inRange ? '#166534' : '#9a3412' }}>
+          {dist !== null ? `${dist}m de distância` : 'Calculando...'} {inRange ? '— Você está no raio!' : `— Precisa estar a ${CHECKIN_RADIUS_M}m`}
+        </span>
       </div>
+
+      {/* Checkin button */}
+      <button
+        onClick={onCheckin}
+        disabled={!inRange || !user}
+        style={{ width: '100%', padding: '13px', background: inRange ? 'linear-gradient(135deg,#ef4444,#f97316)' : '#e2e8f0', color: inRange ? '#fff' : '#94a3b8', border: 'none', borderRadius: 12, fontWeight: 800, fontSize: 15, cursor: inRange ? 'pointer' : 'not-allowed', letterSpacing: 0.5 }}
+      >
+        {inRange ? '⚑ CONQUISTAR TERRITÓRIO' : `📍 Chegue mais perto (${dist}m)`}
+      </button>
     </div>
   )
 }
 
-// ── Achievements View ─────────────────────────────────────────
-const AchievementsView=({user,points})=>{
-  const done=user.achievements||[]
-  const lvl=calcLevel(user.km_total||0)
-  const emblems=user.emblems||[]
-  return(
-    <div style={{overflowY:'auto',height:'100%',background:'#f8fafc',padding:20}}>
-      <div style={{marginBottom:16}}>
-        <div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:4}}>PROGRESSO</div>
-        <div style={{fontSize:22,fontWeight:900,color:'#0f172a',marginBottom:12}}>Conquistas</div>
-        <LevelBar km={user.km_total||0}/>
-      </div>
+// ══════════════════════════════════════════════════════════════════════════════
+// WAR ZONE PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+function WarZonePanel({ zone, onClose, user, userPos, db, profile, profiles, clans }) {
+  const [wzCheckins, setWzCheckins] = useState([])
+  const [leaderboard, setLeaderboard] = useState([])
 
-      {/* Emblems row */}
-      {emblems.length>0&&<div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:14,marginBottom:16,boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
-        <div style={{fontSize:12,fontWeight:700,color:'#64748b',marginBottom:10}}>EMBLEMAS DE NÍVEL</div>
-        <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
-          {emblems.map((e,i)=>(
-            <div key={i} style={{width:40,height:40,borderRadius:12,background:'linear-gradient(135deg,#eef2ff,#e0e7ff)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,border:'1px solid #c7d2fe'}}>{e}</div>
-          ))}
-        </div>
-      </div>}
+  useEffect(() => {
+    const unsub = onSnapshot(
+      query(collection(db, 'wz_checkins'), where('zone_id', '==', zone.id), orderBy('created_at', 'desc'), limit(100)),
+      snap => {
+        const data = snap.docs.map(d => d.data())
+        setWzCheckins(data)
+        // Build leaderboard
+        const scores = {}
+        data.forEach(c => {
+          if (!scores[c.user_id]) scores[c.user_id] = { user_id: c.user_id, user_name: c.user_name, clan_id: c.clan_id, count: 0 }
+          scores[c.user_id].count++
+        })
+        setLeaderboard(Object.values(scores).sort((a,b) => b.count - a.count).slice(0, 10))
+      }
+    )
+    return unsub
+  }, [zone.id, db])
 
-      {/* Challenges */}
-      <div style={{fontSize:12,fontWeight:700,color:'#64748b',marginBottom:10}}>DESAFIOS ({done.length}/{CHALLENGES.length})</div>
-      {CHALLENGES.map(c=>{
-        const isDone=done.includes(c.id)
-        let progress=''
-        try{
-          if(c.id.startsWith('km_')){const need=parseFloat(c.id.split('_')[1]);progress=`${Math.min(need,(user.km_total||0)).toFixed(1)}/${need} km`}
-          else if(c.id.startsWith('ter_')){const need=parseInt(c.id.split('_')[1]);const have=points.filter(p=>p.owner_id===user.uid).length;progress=`${Math.min(need,have)}/${need} bairros`}
-          else if(c.id.startsWith('lvl_')){const need=parseInt(c.id.split('_')[1]);progress=`Nv.${lvl}/${need}`}
-          else if(c.id.startsWith('chk_')){const need=parseInt(c.id.split('_')[1]);progress=`${Math.min(need,user.checkins||0)}/${need}`}
-          else if(c.id.startsWith('bat_')){const field=c.id.includes('_w')?'battles_won':'battles_started';const need=parseInt(c.id.split(/[_w]+/).pop());progress=`${Math.min(need,user[field]||0)}/${need}`}
-        }catch{}
-        return(
-          <div key={c.id} style={{background:isDone?'#f0fdf4':'#fff',border:`1px solid ${isDone?'#86efac':'#e2e8f0'}`,borderRadius:14,padding:14,marginBottom:10,display:'flex',gap:12,alignItems:'center',boxShadow:'0 1px 4px rgba(0,0,0,0.04)',opacity:isDone?1:0.85}}>
-            <div style={{width:48,height:48,borderRadius:14,background:isDone?'linear-gradient(135deg,#f0fdf4,#dcfce7)':'#f8fafc',display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,border:`1px solid ${isDone?'#86efac':'#e2e8f0'}`,flexShrink:0}}>
-              {isDone?c.icon:<span style={{filter:'grayscale(1)',opacity:0.4}}>{c.icon}</span>}
-            </div>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:2}}>
-                <span style={{fontSize:14,fontWeight:700,color:isDone?'#166534':'#0f172a'}}>{c.name}</span>
-                {isDone&&<span style={{fontSize:10,fontWeight:700,color:'#059669',background:'#dcfce7',padding:'2px 6px',borderRadius:20}}>✓ Concluído</span>}
-              </div>
-              <div style={{fontSize:12,color:'#64748b',marginBottom:4}}>{c.desc}</div>
-              {!isDone&&progress&&<div style={{fontSize:11,color:'#94a3b8',fontFamily:'monospace'}}>{progress}</div>}
-            </div>
-            <div style={{textAlign:'right',flexShrink:0}}>
-              <div style={{fontSize:14,fontWeight:900,color:isDone?'#059669':'#94a3b8'}}>+{c.pts}</div>
-              <div style={{fontSize:9,color:'#94a3b8',fontWeight:600}}>PTS</div>
+  const daysLeft = zone.ends_at ? Math.ceil((zone.ends_at.toDate() - Date.now()) / 86400000) : '?'
+  const dist = userPos ? Math.round(calcDistance(userPos.lat, userPos.lng, zone.lat, zone.lng)) : null
+  const inZone = dist !== null && dist <= zone.radius
+
+  return (
+    <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, background: '#fff', borderRadius: '20px 20px 0 0', padding: 20, boxShadow: '0 -4px 32px rgba(0,0,0,0.15)', zIndex: 1000, maxHeight: '70vh', overflowY: 'auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 14 }}>
+        <div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 22 }}>⚔️</span>
+            <div>
+              <div style={{ fontSize: 18, fontWeight: 900, color: '#ef4444' }}>{zone.name}</div>
+              <div style={{ fontSize: 11, color: '#94a3b8' }}>Zona de Guerra — {daysLeft}d restantes</div>
             </div>
           </div>
-        )
-      })}
+        </div>
+        <button onClick={onClose} style={{ background: '#f1f5f9', border: 'none', borderRadius: '50%', width: 30, height: 30, cursor: 'pointer', fontSize: 16 }}>✕</button>
+      </div>
+
+      <div style={{ background: '#fef2f2', borderRadius: 12, padding: '10px 14px', marginBottom: 14, border: '1px solid #fecaca', fontSize: 12, color: '#991b1b' }}>
+        🏆 Quem tiver mais check-ins quando acabar o tempo vence e ganha um troféu permanente no mapa!
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 14 }}>
+        <div style={{ width: 8, height: 8, borderRadius: '50%', background: inZone ? '#22c55e' : '#f97316' }} />
+        <span style={{ fontSize: 12, color: inZone ? '#166534' : '#9a3412' }}>
+          {dist !== null ? `${dist}m do centro` : 'Calculando...'} {inZone ? `— Você está na zona! (raio: ${zone.radius}m)` : `— Raio: ${zone.radius}m`}
+        </span>
+      </div>
+
+      <div style={{ fontSize: 12, fontWeight: 700, color: '#64748b', marginBottom: 10, letterSpacing: 1 }}>PLACAR ({wzCheckins.length} check-ins)</div>
+
+      {leaderboard.length === 0 ? (
+        <div style={{ textAlign: 'center', color: '#94a3b8', fontSize: 13, padding: 20 }}>Nenhum check-in ainda. Seja o primeiro!</div>
+      ) : (
+        leaderboard.map((entry, i) => {
+          const clan = entry.clan_id ? clans.find(c => c.id === entry.clan_id) : null
+          const isMe = entry.user_id === user?.uid
+          return (
+            <div key={entry.user_id} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 10, background: isMe ? '#fef2f2' : i === 0 ? '#fffbeb' : '#f8fafc', marginBottom: 6, border: isMe ? '1px solid #fecaca' : '1px solid transparent' }}>
+              <span style={{ fontSize: 16, width: 24, textAlign: 'center' }}>{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}º`}</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>{entry.user_name} {isMe ? '(você)' : ''}</div>
+                {clan && <div style={{ fontSize: 10, color: clan.color, fontWeight: 600 }}>{clan.emoji} {clan.name}</div>}
+              </div>
+              <span style={{ fontSize: 14, fontWeight: 800, color: '#ef4444' }}>{entry.count}</span>
+            </div>
+          )
+        })
+      )}
     </div>
   )
 }
 
-// ── Admin View ────────────────────────────────────────────────
-const AdminView=({user,points})=>{
-  const[tab,setTab]=useState('users')
-  const[users,setUsers]=useState([])
-  const[loading,setLoading]=useState(true)
-  const[search,setSearch]=useState('')
-  const[editUser,setEditUser]=useState(null)
-  const[editForm,setEditForm]=useState({})
-  const[notifMsg,setNotifMsg]=useState('')
-  const[notifTitle,setNotifTitle]=useState('')
-  const[sending,setSending]=useState(false)
-  const[sent,setSent]=useState(false)
-  const[confirm,setConfirm]=useState(null)
+// ══════════════════════════════════════════════════════════════════════════════
+// RANKING VIEW
+// ══════════════════════════════════════════════════════════════════════════════
+function RankingView({ profiles, points, clans, season, user }) {
+  const [rankTab, setRankTab] = useState('players')
 
-  useEffect(()=>{
-    setLoading(true)
-    return onSnapshot(collection(db,'profiles'),s=>{
-      setUsers(s.docs.map(d=>({id:d.id,...d.data()})))
-      setLoading(false)
-    })
-  },[])
+  const playerRanking = Object.entries(profiles)
+    .map(([id, p]) => ({ id, ...p, territories: points.filter(pt => pt.owner_id === id).length }))
+    .sort((a, b) => (b.points || 0) - (a.points || 0))
+    .slice(0, 50)
 
-  const sendNotification=async()=>{
-    if(!notifTitle.trim()||!notifMsg.trim())return
-    setSending(true)
-    await addDoc(collection(db,'notifications'),{title:notifTitle.trim(),message:notifMsg.trim(),from:user.display_name,from_uid:user.uid,type:'general',read_by:[],created_at:serverTimestamp()})
-    setNotifTitle('');setNotifMsg('');setSent(true)
-    setTimeout(()=>setSent(false),3000)
-    setSending(false)
-  }
+  const clanRanking = clans.map(c => {
+    const members = Object.entries(profiles).filter(([,p]) => p.clan_id === c.id)
+    const totalPts = members.reduce((s, [,p]) => s + (p.points || 0), 0)
+    const totalTerr = points.filter(p => p.clan_id === c.id).length
+    return { ...c, totalPts, totalTerr, memberCount: members.length }
+  }).sort((a,b) => b.totalPts - a.totalPts)
 
-  const openEdit=(u)=>{setEditUser(u);setEditForm({display_name:u.display_name||'',username:u.username||'',city:u.city||'',age:u.age||'',points:u.points||0,km_total:u.km_total||0,bio:u.bio||''})}
+  return (
+    <div style={{ height: '100%', overflowY: 'auto', background: '#f8fafc' }}>
+      <div style={{ padding: '16px 16px 0' }}>
+        {season && (
+          <div style={{ background: 'linear-gradient(135deg,#fbbf24,#f59e0b)', borderRadius: 14, padding: '12px 16px', marginBottom: 14, color: '#78350f' }}>
+            <div style={{ fontSize: 13, fontWeight: 800 }}>🏆 {season.name}</div>
+            <div style={{ fontSize: 11, marginTop: 2 }}>Encerra em {season.ends_at ? Math.ceil((season.ends_at.toDate() - Date.now()) / 86400000) : '?'}d — vencedor ganha troféu permanente</div>
+          </div>
+        )}
 
-  const saveEdit=async()=>{
-    await updateDoc(doc(db,'profiles',editUser.id),{...editForm,points:parseInt(editForm.points)||0,km_total:parseFloat(editForm.km_total)||0,updated_at:serverTimestamp()})
-    setEditUser(null)
-  }
-
-  const deleteUserFn=async(uid)=>{
-    await deleteDoc(doc(db,'profiles',uid))
-    const theirPts=points.filter(p=>p.owner_id===uid)
-    await Promise.all(theirPts.map(p=>updateDoc(doc(db,'conquest_points',p.id),{owner_id:null,owner_name:null,owner_color:null,owner_km:0})))
-    setConfirm(null)
-  }
-
-  const toggleAdmin=async(uid,cur)=>updateDoc(doc(db,'profiles',uid),{is_admin:!cur})
-
-  const filtered=users.filter(u=>
-    !search||(u.display_name||'').toLowerCase().includes(search.toLowerCase())||
-    (u.username||'').toLowerCase().includes(search.toLowerCase())||
-    (u.city||'').toLowerCase().includes(search.toLowerCase())
-  )
-
-  const inp={width:'100%',padding:'10px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:13,outline:'none',marginBottom:8}
-  const tabs=[['users','Usuários'],['notif','Comunicados'],['stats','Estatísticas']]
-
-  return(
-    <div style={{display:'flex',flexDirection:'column',height:'100%',background:'#f8fafc'}}>
-      <div style={{padding:'16px 20px 0',flexShrink:0,background:'#fff',borderBottom:'1px solid #e2e8f0'}}>
-        <div style={{fontSize:11,fontWeight:700,color:'#dc2626',letterSpacing:2,marginBottom:2}}>PAINEL</div>
-        <div style={{fontSize:22,fontWeight:900,color:'#0f172a',marginBottom:12}}>Administração</div>
-        <div style={{display:'flex',gap:6,paddingBottom:12}}>
-          {tabs.map(([id,l])=>(
-            <button key={id} onClick={()=>setTab(id)} style={{padding:'7px 16px',borderRadius:20,border:'none',cursor:'pointer',background:tab===id?'#4f46e5':'#f1f5f9',color:tab===id?'#fff':'#64748b',fontSize:12,fontWeight:700}}>
-              {l}
+        <div style={{ display: 'flex', background: '#fff', borderRadius: 12, padding: 4, marginBottom: 14, border: '1px solid #e2e8f0' }}>
+          {[{ id: 'players', label: '👤 Jogadores' }, { id: 'clans', label: '⚔️ Clans' }].map(t => (
+            <button key={t.id} onClick={() => setRankTab(t.id)} style={{ flex: 1, padding: '8px', background: rankTab === t.id ? '#ef4444' : 'none', color: rankTab === t.id ? '#fff' : '#64748b', border: 'none', borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>
+              {t.label}
             </button>
           ))}
         </div>
       </div>
 
-      {tab==='users'&&<div style={{flex:1,overflowY:'auto',padding:16}}>
-        <div style={{position:'relative',marginBottom:12}}>
-          <input style={{...inp,marginBottom:0,paddingLeft:36}} placeholder="Buscar nome, cidade, username..." value={search} onChange={e=>setSearch(e.target.value)}/>
-          <span style={{position:'absolute',left:12,top:11}}>🔍</span>
-        </div>
-        <div style={{fontSize:12,color:'#94a3b8',marginBottom:12,fontWeight:600}}>{filtered.length}/{users.length} usuários</div>
-        {loading&&<div style={{textAlign:'center',color:'#94a3b8',padding:20}}>Carregando...</div>}
-        {filtered.map(u=>{
-          const myPts=points.filter(p=>p.owner_id===u.id).length
-          return(
-            <div key={u.id} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:14,marginBottom:10,boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
-              <div style={{display:'flex',gap:10,alignItems:'center',marginBottom:10}}>
-                {u.photo_url?<img src={u.photo_url} style={{width:44,height:44,borderRadius:'50%',objectFit:'cover',flexShrink:0}} alt=""/>
-                  :<div style={{width:44,height:44,borderRadius:'50%',background:u.avatar_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:19,color:'#fff',flexShrink:0}}>{u.display_name?.charAt(0)||'?'}</div>}
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-                    <span style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{u.display_name}</span>
-                    {u.is_admin&&<span style={{fontSize:9,fontWeight:700,color:'#4f46e5',background:'#eef2ff',padding:'2px 7px',borderRadius:20}}>ADM</span>}
-                  </div>
-                  <div style={{fontSize:11,color:'#94a3b8'}}>{u.username||''}{u.city?' · '+u.city:''}{u.age?' · '+u.age+'a':''}</div>
-                  <div style={{fontSize:11,color:'#64748b',marginTop:2}}>
-                    {u.bio&&<div style={{marginTop:2,fontStyle:'italic',color:'#94a3b8',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{u.bio}</div>}
-                    <span>⭐{u.points||0} · 🏃{(u.km_total||0).toFixed(1)}km · ⚑{myPts}</span>
-                  </div>
+      <div style={{ padding: '0 16px 16px' }}>
+        {rankTab === 'players' ? (
+          playerRanking.map((p, i) => {
+            const level = getLevel(p.km_total || 0)
+            const clan = p.clan_id ? clans.find(c => c.id === p.clan_id) : null
+            const isMe = p.id === user?.uid
+            return (
+              <div key={p.id} style={{ display: 'flex', alignItems: 'center', gap: 12, background: isMe ? '#fef2f2' : '#fff', borderRadius: 12, padding: '12px 14px', marginBottom: 8, border: isMe ? '1px solid #fecaca' : '1px solid #f1f5f9', boxShadow: '0 1px 4px rgba(0,0,0,0.04)' }}>
+                <span style={{ fontSize: 18, width: 28, textAlign: 'center', fontWeight: 700, color: i < 3 ? '#f59e0b' : '#94a3b8' }}>{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}º`}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>{p.display_name} {isMe ? '(você)' : ''}</div>
+                  <div style={{ fontSize: 11, color: '#64748b' }}>{LEVEL_BADGES[level]} {LEVEL_TITLES[level]} · {(p.km_total||0).toFixed(1)}km · {p.territories}🚩</div>
+                  {clan && <div style={{ fontSize: 10, color: clan.color, fontWeight: 600, marginTop: 1 }}>{clan.emoji} {clan.name}</div>}
                 </div>
+                <span style={{ fontSize: 16, fontWeight: 800, color: '#ef4444' }}>{p.points || 0}</span>
               </div>
-              <div style={{fontSize:10,color:'#94a3b8',background:'#f8fafc',borderRadius:6,padding:'3px 8px',fontFamily:'monospace',marginBottom:8,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>UID: {u.id}</div>
-              <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
-                <button onClick={()=>openEdit(u)} style={{padding:'6px 12px',borderRadius:8,background:'#eef2ff',border:'none',color:'#4f46e5',cursor:'pointer',fontSize:12,fontWeight:700}}>✏️ Editar</button>
-                <button onClick={()=>toggleAdmin(u.id,u.is_admin)} style={{padding:'6px 12px',borderRadius:8,background:u.is_admin?'#fef2f2':'#f0fdf4',border:'none',color:u.is_admin?'#dc2626':'#059669',cursor:'pointer',fontSize:12,fontWeight:700}}>
-                  {u.is_admin?'❌ Remover ADM':'👑 Tornar ADM'}
-                </button>
-                {u.id!==user.uid&&<button onClick={()=>setConfirm({id:u.id,name:u.display_name})} style={{padding:'6px 12px',borderRadius:8,background:'#fef2f2',border:'none',color:'#dc2626',cursor:'pointer',fontSize:12,fontWeight:700}}>🗑️ Apagar</button>}
+            )
+          })
+        ) : (
+          clanRanking.map((c, i) => (
+            <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#fff', borderRadius: 12, padding: '12px 14px', marginBottom: 8, border: '1px solid #f1f5f9', boxShadow: '0 1px 4px rgba(0,0,0,0.04)' }}>
+              <span style={{ fontSize: 18, width: 28, textAlign: 'center' }}>{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i+1}º`}</span>
+              <div style={{ width: 36, height: 36, borderRadius: '50%', background: c.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>{c.emoji}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>{c.name}</div>
+                <div style={{ fontSize: 11, color: '#64748b' }}>{c.memberCount} membros · {c.totalTerr}🚩 territórios</div>
               </div>
+              <span style={{ fontSize: 16, fontWeight: 800, color: c.color }}>{c.totalPts}</span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CLAN VIEW
+// ══════════════════════════════════════════════════════════════════════════════
+function ClanView({ user, profile, clans, myClan, profiles, clanInvites, clanForm, setClanForm, showCreateClan, setShowCreateClan, onCreateClan, onLeaveClan, onRespondInvite, onInvite, points }) {
+  const [search, setSearch] = useState('')
+  const [viewClan, setViewClan] = useState(null)
+
+  const filtered = clans.filter(c => c.name.toLowerCase().includes(search.toLowerCase()))
+
+  if (showCreateClan) {
+    return (
+      <div style={{ height: '100%', overflowY: 'auto', padding: 20, background: '#f8fafc' }}>
+        <button onClick={() => setShowCreateClan(false)} style={{ background: 'none', border: 'none', color: '#6366f1', fontSize: 14, cursor: 'pointer', marginBottom: 16 }}>← Voltar</button>
+        <div style={{ fontSize: 20, fontWeight: 900, color: '#0f172a', marginBottom: 20 }}>⚔️ Criar Clan</div>
+
+        <input value={clanForm.name} onChange={e => setClanForm(f => ({...f, name: e.target.value}))} placeholder="Nome do clan" style={{ width: '100%', padding: '12px 14px', border: '1px solid #e2e8f0', borderRadius: 12, fontSize: 14, marginBottom: 10, boxSizing: 'border-box' }} />
+        <textarea value={clanForm.description} onChange={e => setClanForm(f => ({...f, description: e.target.value}))} placeholder="Descrição (opcional)" rows={3} style={{ width: '100%', padding: '12px 14px', border: '1px solid #e2e8f0', borderRadius: 12, fontSize: 14, marginBottom: 14, resize: 'none', boxSizing: 'border-box' }} />
+
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#64748b', marginBottom: 8 }}>COR DO CLAN</div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+          {CLAN_COLORS.map(c => (
+            <div key={c} onClick={() => setClanForm(f => ({...f, color: c}))} style={{ width: 32, height: 32, borderRadius: '50%', background: c, cursor: 'pointer', border: clanForm.color === c ? '3px solid #0f172a' : '2px solid transparent', transform: clanForm.color === c ? 'scale(1.2)' : 'scale(1)', transition: 'all 0.15s' }} />
+          ))}
+        </div>
+
+        <div style={{ fontSize: 13, fontWeight: 700, color: '#64748b', marginBottom: 8 }}>EMBLEMA</div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 20 }}>
+          {CLAN_EMOJIS.map(e => (
+            <div key={e} onClick={() => setClanForm(f => ({...f, emoji: e}))} style={{ width: 40, height: 40, borderRadius: 10, background: clanForm.emoji === e ? clanForm.color : '#f1f5f9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20, cursor: 'pointer', border: clanForm.emoji === e ? `2px solid ${clanForm.color}` : '2px solid transparent' }}>
+              {e}
+            </div>
+          ))}
+        </div>
+
+        {/* Preview */}
+        <div style={{ background: '#fff', borderRadius: 14, padding: 16, marginBottom: 20, border: '1px solid #e2e8f0', display: 'flex', alignItems: 'center', gap: 14 }}>
+          <div style={{ width: 50, height: 50, borderRadius: '50%', background: clanForm.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24 }}>{clanForm.emoji}</div>
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 800, color: '#0f172a' }}>{clanForm.name || 'Nome do clan'}</div>
+            <div style={{ fontSize: 11, color: '#94a3b8' }}>{clanForm.description || 'Descrição'}</div>
+          </div>
+        </div>
+
+        <button onClick={onCreateClan} style={{ width: '100%', padding: 14, background: `linear-gradient(135deg,${clanForm.color},${clanForm.color}cc)`, color: '#fff', border: 'none', borderRadius: 12, fontWeight: 800, fontSize: 15, cursor: 'pointer' }}>
+          ⚔️ CRIAR CLAN
+        </button>
+      </div>
+    )
+  }
+
+  if (viewClan) {
+    const members = Object.entries(profiles).filter(([,p]) => p.clan_id === viewClan.id)
+    const clanPoints = points.filter(p => p.clan_id === viewClan.id)
+    return (
+      <div style={{ height: '100%', overflowY: 'auto', background: '#f8fafc' }}>
+        <div style={{ background: `linear-gradient(135deg,${viewClan.color}22,${viewClan.color}11)`, padding: 20, borderBottom: `3px solid ${viewClan.color}` }}>
+          <button onClick={() => setViewClan(null)} style={{ background: 'none', border: 'none', color: viewClan.color, fontSize: 14, cursor: 'pointer', marginBottom: 10 }}>← Voltar</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+            <div style={{ width: 60, height: 60, borderRadius: '50%', background: viewClan.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 30 }}>{viewClan.emoji}</div>
+            <div>
+              <div style={{ fontSize: 22, fontWeight: 900, color: '#0f172a' }}>{viewClan.name}</div>
+              <div style={{ fontSize: 12, color: '#64748b' }}>{viewClan.description}</div>
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+            {[['👥', members.length, 'Membros'], ['🚩', clanPoints.length, 'Territórios']].map(([ic, v, l]) => (
+              <div key={l} style={{ flex: 1, background: '#fff', borderRadius: 10, padding: '8px 12px', textAlign: 'center', border: `1px solid ${viewClan.color}44` }}>
+                <div style={{ fontSize: 16 }}>{ic}</div>
+                <div style={{ fontSize: 18, fontWeight: 900, color: viewClan.color }}>{v}</div>
+                <div style={{ fontSize: 10, color: '#94a3b8' }}>{l}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div style={{ padding: 16 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#64748b', marginBottom: 10 }}>MEMBROS</div>
+          {members.map(([id, p]) => (
+            <div key={id} style={{ display: 'flex', alignItems: 'center', gap: 10, background: '#fff', borderRadius: 10, padding: '10px 14px', marginBottom: 8 }}>
+              <div style={{ width: 34, height: 34, borderRadius: '50%', background: viewClan.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14 }}>{viewClan.emoji}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 700 }}>{p.display_name} {viewClan.owner_id === id ? '👑' : ''}</div>
+                <div style={{ fontSize: 11, color: '#94a3b8' }}>{(p.km_total||0).toFixed(1)}km · {p.points||0}pts</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ height: '100%', overflowY: 'auto', background: '#f8fafc' }}>
+      <div style={{ padding: '16px 16px 0' }}>
+
+        {/* Invites */}
+        {clanInvites.map(invite => (
+          <div key={invite.id} style={{ background: '#fffbeb', borderRadius: 12, padding: '12px 14px', marginBottom: 10, border: '1px solid #fde68a' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: '#92400e', marginBottom: 8 }}>⚔️ Convite de clan: <b>{invite.clan_name}</b></div>
+            <div style={{ fontSize: 12, color: '#78350f', marginBottom: 10 }}>De {invite.from_name}</div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button onClick={() => onRespondInvite(invite, true)} style={{ flex: 1, padding: '8px', background: '#22c55e', color: '#fff', border: 'none', borderRadius: 8, fontWeight: 700, cursor: 'pointer' }}>Aceitar</button>
+              <button onClick={() => onRespondInvite(invite, false)} style={{ flex: 1, padding: '8px', background: '#f1f5f9', color: '#64748b', border: 'none', borderRadius: 8, fontWeight: 700, cursor: 'pointer' }}>Recusar</button>
+            </div>
+          </div>
+        ))}
+
+        {/* My clan */}
+        {myClan && (
+          <div style={{ background: `linear-gradient(135deg,${myClan.color}22,${myClan.color}11)`, borderRadius: 14, padding: 16, marginBottom: 14, border: `1px solid ${myClan.color}44` }}>
+            <div style={{ fontSize: 11, color: '#94a3b8', marginBottom: 6 }}>SEU CLAN</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ width: 44, height: 44, borderRadius: '50%', background: myClan.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22 }}>{myClan.emoji}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 16, fontWeight: 800, color: '#0f172a' }}>{myClan.name}</div>
+                <div style={{ fontSize: 12, color: '#64748b' }}>{myClan.member_count} membros</div>
+              </div>
+              <button onClick={() => setViewClan(myClan)} style={{ padding: '6px 12px', background: myClan.color, color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>Ver</button>
+            </div>
+            <button onClick={onLeaveClan} style={{ marginTop: 10, width: '100%', padding: '8px', background: 'rgba(239,68,68,0.08)', color: '#ef4444', border: '1px solid rgba(239,68,68,0.2)', borderRadius: 8, fontSize: 12, cursor: 'pointer' }}>Sair do clan</button>
+          </div>
+        )}
+
+        {!myClan && (
+          <button onClick={() => setShowCreateClan(true)} style={{ width: '100%', padding: 14, background: 'linear-gradient(135deg,#ef4444,#f97316)', color: '#fff', border: 'none', borderRadius: 12, fontWeight: 800, fontSize: 15, cursor: 'pointer', marginBottom: 14 }}>
+            ⚔️ CRIAR MEU CLAN
+          </button>
+        )}
+
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Buscar clans..." style={{ width: '100%', padding: '10px 14px', border: '1px solid #e2e8f0', borderRadius: 12, fontSize: 14, marginBottom: 12, boxSizing: 'border-box', background: '#fff' }} />
+      </div>
+
+      <div style={{ padding: '0 16px 16px' }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: '#64748b', marginBottom: 10 }}>TODOS OS CLANS ({filtered.length})</div>
+        {filtered.map(c => {
+          const members = Object.entries(profiles).filter(([,p]) => p.clan_id === c.id)
+          const clanPoints = points.filter(p => p.clan_id === c.id)
+          return (
+            <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 12, background: '#fff', borderRadius: 12, padding: '12px 14px', marginBottom: 8, border: '1px solid #f1f5f9', boxShadow: '0 1px 4px rgba(0,0,0,0.04)' }}>
+              <div style={{ width: 42, height: 42, borderRadius: '50%', background: c.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20 }}>{c.emoji}</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: '#0f172a' }}>{c.name}</div>
+                <div style={{ fontSize: 11, color: '#64748b' }}>{members.length} membros · {clanPoints.length}🚩</div>
+                {c.description && <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 1 }}>{c.description}</div>}
+              </div>
+              <button onClick={() => setViewClan(c)} style={{ padding: '6px 12px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', color: '#64748b' }}>Ver</button>
             </div>
           )
         })}
-      </div>}
-
-      {tab==='notif'&&<div style={{flex:1,overflowY:'auto',padding:16}}>
-        <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:16,padding:18,marginBottom:16}}>
-          <div style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:14}}>Enviar para todos os jogadores</div>
-          <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:4}}>Título</label>
-          <input style={inp} placeholder="Ex: Nova funcionalidade disponível!" value={notifTitle} onChange={e=>setNotifTitle(e.target.value)}/>
-          <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:4}}>Mensagem</label>
-          <textarea style={{...inp,resize:'none',height:90,fontFamily:'inherit'}} placeholder="Escreva o comunicado..." value={notifMsg} onChange={e=>setNotifMsg(e.target.value)}/>
-          <button onClick={sendNotification} disabled={sending||!notifTitle.trim()||!notifMsg.trim()} style={{width:'100%',padding:'12px',borderRadius:12,border:'none',background:notifTitle.trim()&&notifMsg.trim()?'#4f46e5':'#c7d2fe',color:'#fff',fontWeight:900,cursor:'pointer',fontSize:13}}>
-            {sending?'Enviando...':sent?'✅ Enviado com sucesso!':'Enviar comunicado'}
-          </button>
-        </div>
-        <NotifHistory/>
-      </div>}
-
-      {tab==='stats'&&<div style={{flex:1,overflowY:'auto',padding:16}}>
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:16}}>
-          {[['Jogadores',users.length,'👥'],['Territórios',points.length,'⚑'],['Conquistados',points.filter(p=>p.owner_id).length,'🏆'],['Livres',points.filter(p=>!p.owner_id).length,'🏳️'],['KMs totais',users.reduce((s,u)=>s+(u.km_total||0),0).toFixed(1)+'km','🏃'],['Pontos totais',users.reduce((s,u)=>s+(u.points||0),0),'⭐']].map(([l,v,ic])=>(
-            <div key={l} style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:'14px 12px',boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
-              <div style={{fontSize:20,marginBottom:4}}>{ic}</div>
-              <div style={{fontSize:19,fontWeight:900,color:'#4f46e5'}}>{v}</div>
-              <div style={{fontSize:10,color:'#94a3b8',fontWeight:600}}>{l}</div>
-            </div>
-          ))}
-        </div>
-        <div style={{background:'#fff',border:'1px solid #e2e8f0',borderRadius:14,padding:16}}>
-          <div style={{fontSize:13,fontWeight:700,color:'#0f172a',marginBottom:10}}>Top jogadores</div>
-          {[...users].sort((a,b)=>(b.points||0)-(a.points||0)).slice(0,5).map((u,i)=>(
-            <div key={u.id} style={{display:'flex',alignItems:'center',gap:10,marginBottom:8,padding:'8px 0',borderBottom:'1px solid #f1f5f9'}}>
-              <span style={{fontSize:16,width:24}}>{['🥇','🥈','🥉','4️⃣','5️⃣'][i]}</span>
-              <div style={{width:32,height:32,borderRadius:'50%',background:u.avatar_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,color:'#fff',fontSize:14}}>{u.display_name?.charAt(0)}</div>
-              <div style={{flex:1}}><div style={{fontSize:13,fontWeight:700,color:'#0f172a'}}>{u.display_name}</div><div style={{fontSize:11,color:'#64748b'}}>{u.city||''}</div></div>
-              <div style={{textAlign:'right'}}><div style={{fontSize:14,fontWeight:900,color:'#4f46e5'}}>{u.points||0}</div><div style={{fontSize:10,color:'#94a3b8'}}>pts</div></div>
-            </div>
-          ))}
-        </div>
-      </div>}
-
-      {/* Edit User Modal */}
-      {editUser&&<div style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:200,padding:16}}>
-        <div style={{background:'#fff',borderRadius:20,padding:24,width:'100%',maxWidth:360,maxHeight:'85vh',overflowY:'auto'}}>
-          <div style={{fontSize:16,fontWeight:900,color:'#0f172a',marginBottom:16}}>Editar: {editUser.display_name}</div>
-          {[['Nome','display_name','text'],['Username','username','text'],['Cidade','city','text'],['Idade','age','number'],['Pontos','points','number'],['KMs','km_total','number'],['Bio','bio','text']].map(([l,k,t])=>(
-            <div key={k}>
-              <label style={{fontSize:11,color:'#64748b',fontWeight:600,display:'block',marginBottom:3}}>{l}</label>
-              <input style={inp} type={t} value={editForm[k]||''} onChange={e=>setEditForm(f=>({...f,[k]:e.target.value}))}/>
-            </div>
-          ))}
-          <div style={{display:'flex',gap:8,marginTop:8}}>
-            <button onClick={()=>setEditUser(null)} style={{flex:1,padding:'11px',borderRadius:10,background:'#f1f5f9',border:'none',color:'#64748b',cursor:'pointer',fontWeight:700}}>Cancelar</button>
-            <button onClick={saveEdit} style={{flex:2,padding:'11px',borderRadius:10,background:'#4f46e5',border:'none',color:'#fff',cursor:'pointer',fontWeight:900}}>Salvar</button>
-          </div>
-        </div>
-      </div>}
-
-      {/* Delete Confirm Modal */}
-      {confirm&&<div style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.5)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:200,padding:16}}>
-        <div style={{background:'#fff',borderRadius:20,padding:24,width:'100%',maxWidth:320}}>
-          <div style={{fontSize:16,fontWeight:900,color:'#dc2626',marginBottom:8}}>Apagar usuário?</div>
-          <div style={{fontSize:14,color:'#64748b',marginBottom:20}}>"{confirm.name}" será removido permanentemente e perderá todos os territórios.</div>
-          <div style={{display:'flex',gap:8}}>
-            <button onClick={()=>setConfirm(null)} style={{flex:1,padding:'11px',borderRadius:10,background:'#f1f5f9',border:'none',color:'#64748b',cursor:'pointer',fontWeight:700}}>Cancelar</button>
-            <button onClick={()=>deleteUserFn(confirm.id)} style={{flex:1,padding:'11px',borderRadius:10,background:'#dc2626',border:'none',color:'#fff',cursor:'pointer',fontWeight:900}}>Apagar</button>
-          </div>
-        </div>
-      </div>}
-    </div>
-  )
-}
-
-// ── Auth ──────────────────────────────────────────────────────
-const Auth=({onAuth})=>{
-  const[mode,setMode]=useState('login')
-  const[email,setEmail]=useState('')
-  const[pass,setPass]=useState('')
-  const[name,setName]=useState('')
-  const[city,setCity]=useState('')
-  const[loading,setLoading]=useState(false)
-  const[err,setErr]=useState('')
-  const s={width:'100%',padding:'12px 14px',background:'#f8fafc',border:'1px solid #e2e8f0',borderRadius:10,color:'#0f172a',fontSize:14,outline:'none'}
-  const msgs={'auth/email-already-in-use':'Email já cadastrado.','auth/wrong-password':'Senha incorreta.','auth/user-not-found':'Usuário não encontrado.','auth/weak-password':'Senha fraca (mín. 6 chars).','auth/invalid-email':'Email inválido.','auth/invalid-credential':'Email ou senha incorretos.'}
-  const submit=async()=>{
-    setLoading(true);setErr('')
-    try{
-      if(mode==='signup'){
-        const color=rndColor()
-        const c=await createUserWithEmailAndPassword(auth,email,pass)
-        await setDoc(doc(db,'profiles',c.user.uid),{uid:c.user.uid,display_name:name,username:`@${name.toLowerCase().replace(/\s+/g,'')}`,avatar_color:color,km_total:0,points:0,is_admin:false,city:city||'',created_at:serverTimestamp()})
-        onAuth({uid:c.user.uid,display_name:name,avatar_color:color,km_total:0,points:0,is_admin:false,city:city||''})
-      }else{
-        const c=await signInWithEmailAndPassword(auth,email,pass)
-        const snap=await getDoc(doc(db,'profiles',c.user.uid))
-        onAuth(snap.exists()?{uid:c.user.uid,...snap.data()}:{uid:c.user.uid,display_name:email.split('@')[0],avatar_color:'#4f46e5',km_total:0,points:0,is_admin:false})
-      }
-    }catch(e){setErr(msgs[e.code]||e.message)}
-    setLoading(false)
-  }
-  return(
-    <div style={{minHeight:'100vh',background:'linear-gradient(135deg,#eef2ff 0%,#f0fdf4 100%)',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
-      <div style={{width:'100%',maxWidth:360,background:'#fff',borderRadius:24,padding:32,boxShadow:'0 20px 60px rgba(0,0,0,0.1)'}}>
-        <div style={{textAlign:'center',marginBottom:28}}>
-          <div style={{width:64,height:64,background:'linear-gradient(135deg,#4f46e5,#7c3aed)',borderRadius:20,display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 12px',fontSize:30}}>⚔️</div>
-          <div style={{fontSize:26,fontWeight:900,color:'#0f172a'}}>War Maps</div>
-          <div style={{fontSize:12,color:'#64748b',marginTop:4}}>Conquiste seu território</div>
-        </div>
-        <div style={{display:'flex',gap:8,marginBottom:20,background:'#f1f5f9',borderRadius:12,padding:4}}>
-          {['login','signup'].map(m=>(
-            <button key={m} onClick={()=>setMode(m)} style={{flex:1,padding:'9px',borderRadius:9,border:'none',cursor:'pointer',background:mode===m?'#fff':'transparent',color:mode===m?'#0f172a':'#64748b',fontSize:13,fontWeight:700,boxShadow:mode===m?'0 1px 4px rgba(0,0,0,0.1)':'none',transition:'all 0.2s'}}>
-              {m==='login'?'Entrar':'Criar conta'}
-            </button>
-          ))}
-        </div>
-        <div style={{display:'flex',flexDirection:'column',gap:10}}>
-          {mode==='signup'&&<input style={s} placeholder="Seu nome" value={name} onChange={e=>setName(e.target.value)}/>}
-          {mode==='signup'&&<input style={s} placeholder="Sua cidade (ex: São Paulo)" value={city} onChange={e=>setCity(e.target.value)}/>}
-          <input style={s} type="email" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()}/>
-          <input style={s} type="password" placeholder="Senha" value={pass} onChange={e=>setPass(e.target.value)} onKeyDown={e=>e.key==='Enter'&&submit()}/>
-        </div>
-        {err&&<div style={{fontSize:12,color:'#dc2626',marginTop:10,textAlign:'center',background:'#fef2f2',padding:'8px 12px',borderRadius:8}}>{err}</div>}
-        <button onClick={submit} disabled={loading} style={{width:'100%',marginTop:16,padding:'13px',borderRadius:12,border:'none',background:loading?'#c7d2fe':'linear-gradient(135deg,#4f46e5,#7c3aed)',color:'#fff',fontSize:14,fontWeight:900,cursor:loading?'wait':'pointer',boxShadow:'0 4px 14px rgba(79,70,229,0.4)'}}>
-          {loading?'Aguarde...':mode==='login'?'Entrar':'Criar conta'}
-        </button>
+        {filtered.length === 0 && <div style={{ textAlign: 'center', color: '#94a3b8', fontSize: 13, padding: 30 }}>Nenhum clan encontrado</div>}
       </div>
     </div>
   )
 }
 
-const GeoBar=({geo})=>{
-  const[c,bg,txt]=geo.loading?['#d97706','#fffbeb','Obtendo GPS...']:geo.err?['#dc2626','#fef2f2',geo.err]:['#059669','#f0fdf4',`GPS ✓ ±${Math.round(geo.acc||0)}m`]
-  return <div style={{position:'absolute',bottom:20,left:'50%',transform:'translateX(-50%)',background:bg,border:`1px solid ${c}40`,borderRadius:20,padding:'7px 16px',display:'flex',alignItems:'center',gap:8,fontSize:11,fontWeight:600,color:c,zIndex:1000,whiteSpace:'nowrap',boxShadow:'0 4px 20px rgba(0,0,0,0.12)'}}><I n={geo.loading?'zap':geo.err?'warn':'wifi'} s={13} c={c}/>{txt}</div>
-}
-
-// ── Main App ──────────────────────────────────────────────────
-export default function App(){
-  const[user,setUser]=useState(null)
-  const[loading,setLoading]=useState(true)
-  const[tab,setTab]=useState('map')
-  const[points,setPoints]=useState([])
-  const[battles,setBattles]=useState([])
-  const[profiles,setProfiles]=useState({})
-  const[selected,setSelected]=useState(null)
-  const[addMode,setAddMode]=useState(false)
-  const[editingPoint,setEditingPoint]=useState(null)
-  const[toast,setToast]=useState(null)
-  const[notifications,setNotifications]=useState([])
-  const[showNotifs,setShowNotifs]=useState(false)
-  const[leaflet,setLeaflet]=useState(!!window.L)
-  const[loadingNeighborhoods,setLoadingNeighborhoods]=useState(false)
-  const[neighborhoodStatus,setNeighborhoodStatus]=useState('idle')
-  const kmCallbackRef=useRef(null)
-  const geo=useGeo(user,(...args)=>kmCallbackRef.current?.(...args))
-
-  useEffect(()=>{
-    if(window.L){setLeaflet(true);return}
-    const s=document.createElement('script')
-    s.src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'
-    s.onload=()=>setLeaflet(true)
-    document.head.appendChild(s)
-  },[])
-
-  useEffect(()=>onAuthStateChanged(auth,async fbUser=>{
-    if(fbUser){const snap=await getDoc(doc(db,'profiles',fbUser.uid));setUser(snap.exists()?{uid:fbUser.uid,...snap.data()}:{uid:fbUser.uid,display_name:fbUser.email?.split('@')[0],avatar_color:'#4f46e5',km_total:0,points:0,is_admin:false})}
-    else setUser(null)
-    setLoading(false)
-  }),[])
-
-  useEffect(()=>{
-    if(!user)return
-    const u1=onSnapshot(collection(db,'conquest_points'),s=>setPoints(s.docs.map(d=>({id:d.id,...d.data()}))))
-    const u2=onSnapshot(query(collection(db,'battles'),where('status','==','active')),s=>setBattles(s.docs.map(d=>({id:d.id,...d.data()}))))
-    getDocs(collection(db,'profiles')).then(s=>{const m={};s.docs.forEach(d=>m[d.id]=d.data());setProfiles(m)})
-    // Load notifications
-    const u3=onSnapshot(query(collection(db,'notifications'),orderBy('created_at','desc')),s=>{
-      setNotifications(s.docs.map(d=>({id:d.id,...d.data()})))
-    })
-    return()=>{u1();u2();u3()}
-  },[user])
-
-  // Auto-sync neighborhoods
-  const syncArea=useNeighborhoodSync(geo,user,setLoadingNeighborhoods,setNeighborhoodStatus)
-
-  const toast$=(msg,type='ok')=>{setToast({msg,type});setTimeout(()=>setToast(null),4000)}
-
-  const handleCheckin=r=>{
-    if(!r.ok){toast$(`❌ ${r.error}`,'err');return}
-    toast$(r.action==='conquered'?`🏆 Território conquistado! +${r.pts} pts`:`📍 Check-in! (${fmtD(r.dist)})`,'ok')
-  }
-
-  const handleBattle=async pt=>{
-    await addDoc(collection(db,'battles'),{conquest_point_id:pt.id,attacker_id:user.uid,attacker_name:user.display_name,defender_id:pt.owner_id,defender_name:pt.owner_name||'?',attacker_km:user.km_total||0,defender_km:pt.owner_km||0,status:'active',ends_at:new Date(Date.now()+86400000),created_at:serverTimestamp()})
-    toast$(`⚔️ Batalha iniciada em ${pt.name}!`,'warn');setTab('battles')
-  }
-
-  const handleSaveNewPoint=async form=>{
-    await addDoc(collection(db,'conquest_points'),{name:form.name,type:form.type,lat:editingPoint.lat,lng:editingPoint.lng,radius_m:parseInt(form.radius),base_points:form.type==='AREA'?300:100,owner_id:null,owner_km:0,source:'admin',created_by:user.uid,created_at:serverTimestamp()})
-    setEditingPoint(null);setAddMode(false);toast$(`✅ "${form.name}" adicionado!`,'ok')
-  }
-
-  const handleUpdatePoint=async form=>{
-    await updateDoc(doc(db,'conquest_points',editingPoint.point.id),{name:form.name,type:form.type,radius_m:parseInt(form.radius),base_points:form.type==='AREA'?300:100,updated_at:serverTimestamp()})
-    setEditingPoint(null);setSelected(null);toast$(`✅ Ponto atualizado!`,'ok')
-  }
-
-  const handleDeletePoint=async()=>{
-    await deleteDoc(doc(db,'conquest_points',editingPoint.point.id))
-    setEditingPoint(null);setSelected(null);toast$(`🗑️ Ponto removido.`,'ok')
-  }
-
-  // Save KMs to Firestore and update user state
-  const handleKmUpdate=useCallback(async(km)=>{
-    if(!user||km<=0)return
-    try{
-      const newTotal=parseFloat(((user.km_total||0)+km).toFixed(3))
-      const oldLevel=calcLevel(user.km_total||0)
-      const newLevel=calcLevel(newTotal)
-      const updates={km_total:newTotal}
-      // Level up!
-      if(newLevel>oldLevel){
-        const bonus=levelPointsBonus(newLevel)
-        updates.level=newLevel
-        updates.points=(user.points||0)+bonus
-        updates.emblems=[...(user.emblems||[]),getLevelEmblem(newLevel)].filter((v,i,a)=>a.indexOf(v)===i)
-        toast$(`${getLevelEmblem(newLevel)} Nível ${newLevel}! +${bonus} pts — ${getLevelTitle(newLevel)}`,'ok')
-      }
-      await updateDoc(doc(db,'profiles',user.uid),updates)
-      setUser(u=>({...u,...updates}))
-      // Check challenges
-      const updatedUser={...user,...updates}
-      const allPts=points
-      const completed=CHALLENGES.filter(c=>{
-        const alreadyDone=(user.achievements||[]).includes(c.id)
-        if(alreadyDone)return false
-        try{return c.check(updatedUser,allPts)}catch{return false}
-      })
-      for(const c of completed){
-        const achUpdates={
-          achievements:[...(updatedUser.achievements||[]),c.id],
-          points:(updatedUser.points||0)+c.pts,
-        }
-        await updateDoc(doc(db,'profiles',user.uid),achUpdates)
-        setUser(u=>({...u,...achUpdates}))
-        toast$(`${c.icon} Conquista: ${c.name}! +${c.pts} pts`,'ok')
-        await new Promise(r=>setTimeout(r,2000)) // stagger toasts
-      }
-      // Also update owner_km on territories this user owns
-      const myPoints=points.filter(p=>p.owner_id===user.uid)
-      if(myPoints.length>0){
-        await Promise.all(myPoints.map(p=>
-          updateDoc(doc(db,'conquest_points',p.id),{owner_km:(p.owner_km||0)+km})
-        ))
-      }
-      // Update active battles where user is attacker or defender
-      const myBattles=battles.filter(b=>b.attacker_id===user.uid||b.defender_id===user.uid)
-      for(const b of myBattles){
-        if(b.attacker_id===user.uid){
-          await updateDoc(doc(db,'battles',b.id),{attacker_km:(b.attacker_km||0)+km})
-        }else{
-          await updateDoc(doc(db,'battles',b.id),{defender_km:(b.defender_km||0)+km})
-        }
-      }
-    }catch(e){console.error('KM save error:',e)}
-  },[user,points,battles])
-
-  // Connect km callback ref after handleKmUpdate is defined
-  useEffect(()=>{kmCallbackRef.current=handleKmUpdate},[handleKmUpdate])
-
-  const handleClearAndResync=async()=>{
-    if(!window.confirm('Apagar todos os bairros importados e reimportar? Os pontos manuais serão mantidos.'))return
-    toast$('🗑️ Limpando pontos antigos...','warn')
-    // Delete all auto-imported points (source: osm, muni, brasil-aberto)
-    const snap=await getDocs(collection(db,'conquest_points'))
-    const toDelete=snap.docs.filter(d=>{
-      const src=d.data().source
-      return src==='osm'||src==='municipios-fallback'||src==='brasil-aberto'||src==='nominatim'||src==='muni'||d.data().osm_id?.startsWith('muni_')||d.data().osm_id?.startsWith('grid_')
-    })
-    await Promise.all(toDelete.map(d=>deleteDoc(doc(db,'conquest_points',d.id))))
-    toast$(`✅ ${toDelete.length} pontos removidos. Reimportando...`,'ok')
-    // Force resync
-    if(geo.lat) syncArea(geo.lat,geo.lng,true)
-  }
-
-  const nearby=geo.lat?points.filter(p=>hav(geo.lat,geo.lng,p.lat,p.lng)<2000):[]
-  const tc={ok:{bg:'#f0fdf4',bo:'#86efac',tx:'#166534'},err:{bg:'#fef2f2',bo:'#fca5a5',tx:'#991b1b'},warn:{bg:'#fffbeb',bo:'#fcd34d',tx:'#92400e'}}
-  const t=tc[toast?.type]||tc.ok
-
-  if(loading)return(
-    <div style={{minHeight:'100vh',background:'linear-gradient(135deg,#eef2ff,#f0fdf4)',display:'flex',alignItems:'center',justifyContent:'center',flexDirection:'column',gap:16}}>
-      <div style={{width:64,height:64,background:'linear-gradient(135deg,#4f46e5,#7c3aed)',borderRadius:20,display:'flex',alignItems:'center',justifyContent:'center',fontSize:30}}>⚔️</div>
-      <div style={{fontSize:14,color:'#64748b',fontWeight:600}}>Carregando War Maps...</div>
+// ══════════════════════════════════════════════════════════════════════════════
+// NOTIFICATIONS VIEW
+// ══════════════════════════════════════════════════════════════════════════════
+function NotificationsView({ notifications, onMarkRead, onMarkAll }) {
+  return (
+    <div style={{ height: '100%', overflowY: 'auto', background: '#f8fafc' }}>
+      <div style={{ padding: '16px 16px 0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div style={{ fontSize: 18, fontWeight: 900, color: '#0f172a' }}>🔔 Notificações</div>
+        {notifications.length > 0 && <button onClick={onMarkAll} style={{ background: 'none', border: 'none', color: '#6366f1', fontSize: 12, cursor: 'pointer', fontWeight: 700 }}>Marcar todas como lidas</button>}
+      </div>
+      <div style={{ padding: 16 }}>
+        {notifications.length === 0 ? (
+          <div style={{ textAlign: 'center', color: '#94a3b8', fontSize: 14, padding: 40 }}>Nenhuma notificação</div>
+        ) : (
+          notifications.map(n => (
+            <div key={n.id} onClick={() => onMarkRead(n.id)} style={{ background: '#fff', borderRadius: 12, padding: '12px 14px', marginBottom: 8, border: '1px solid #fecaca', cursor: 'pointer' }}>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                <span style={{ fontSize: 20 }}>{n.type === 'conquest' ? '⚑' : n.type === 'battle' ? '⚔️' : '📢'}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>{n.message}</div>
+                  <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 3 }}>{timeAgo(n.created_at)}</div>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
     </div>
   )
-  if(!user)return <Auth onAuth={setUser}/>
+}
 
-  const nav=[
-    {id:'map',n:'map',l:'Mapa'},
-    {id:'nearby',n:'pin',l:'Perto',b:nearby.length},
-    {id:'battles',n:'sword',l:'Batalhas',b:battles.length},
-    {id:'ranking',n:'trophy',l:'Ranking'},
-    {id:'conquistas',n:'star',l:'Conquistas'},
-    {id:'forum',n:'forum',l:'Fórum'},
-    {id:'profile',n:'user',l:'Perfil'},
-    ...(user?.is_admin?[{id:'admin',n:'settings',l:'ADM'}]:[]),
-  ]
+// ══════════════════════════════════════════════════════════════════════════════
+// PROFILE VIEW
+// ══════════════════════════════════════════════════════════════════════════════
+function ProfileView({ user, profile, setProfile, db, myPoints, level, myClan, myRivalry, profiles, rivalries, onSignOut, season, onCreateSeason }) {
+  const [editing, setEditing] = useState(false)
+  const [form, setForm] = useState({ display_name: profile?.display_name || '', bio: '', city: '' })
 
-  return(
-    <div style={{display:'flex',height:'100vh',background:'#f8fafc',overflow:'hidden'}}>
-      <nav style={{width:68,background:'#fff',borderRight:'1px solid #e2e8f0',display:'flex',flexDirection:'column',alignItems:'center',padding:'14px 0',flexShrink:0,zIndex:40,boxShadow:'2px 0 8px rgba(0,0,0,0.04)'}}>
-        <div style={{marginBottom:18,width:40,height:40,background:'linear-gradient(135deg,#4f46e5,#7c3aed)',borderRadius:12,display:'flex',alignItems:'center',justifyContent:'center',fontSize:20}}>⚔️</div>
-        <div style={{flex:1,display:'flex',flexDirection:'column',gap:1,width:'100%',padding:'0 6px'}}>
-          {nav.map(item=>(
-            <button key={item.id} onClick={()=>setTab(item.id)} style={{position:'relative',width:'100%',padding:'9px 0',borderRadius:10,border:'none',background:tab===item.id?'#eef2ff':'transparent',color:tab===item.id?'#4f46e5':'#94a3b8',cursor:'pointer',display:'flex',flexDirection:'column',alignItems:'center',gap:3,transition:'all 0.2s'}}>
-              <I n={item.n} s={19} c={tab===item.id?'#4f46e5':'#94a3b8'}/>
-              <span style={{fontSize:8,fontWeight:600}}>{item.l}</span>
-              {item.b>0&&<div style={{position:'absolute',top:5,right:7,width:15,height:15,borderRadius:'50%',background:'#dc2626',display:'flex',alignItems:'center',justifyContent:'center',fontSize:9,fontWeight:900,color:'#fff'}}>{item.b}</div>}
-            </button>
-          ))}
-        </div>
-        <div style={{marginBottom:10,textAlign:'center'}}>
-          <div style={{width:8,height:8,borderRadius:'50%',background:geo.lat?'#10b981':geo.loading?'#f59e0b':'#ef4444',margin:'0 auto 3px'}}/>
-          <span style={{fontSize:7,color:'#94a3b8',fontWeight:600}}>GPS</span>
-        </div>
-        <button onClick={()=>setShowNotifs(!showNotifs)} style={{position:'relative',background:'none',border:'none',cursor:'pointer',marginBottom:8,padding:4}}>
-          <I n="bell" s={20} c={notifications.filter(n=>!(n.read_by||[]).includes(user?.uid)).length>0?'#f59e0b':'#94a3b8'}/>
-          {notifications.filter(n=>!(n.read_by||[]).includes(user?.uid)).length>0&&<div style={{position:'absolute',top:0,right:0,width:14,height:14,borderRadius:'50%',background:'#f59e0b',display:'flex',alignItems:'center',justifyContent:'center',fontSize:8,fontWeight:900,color:'#fff'}}>{notifications.filter(n=>!(n.read_by||[]).includes(user?.uid)).length}</div>}
-        </button>
-        <div onClick={()=>setTab('profile')} style={{width:40,height:40,borderRadius:'50%',overflow:'hidden',border:'2px solid #e2e8f0',cursor:'pointer',flexShrink:0}}>
-          {user.photo_url?<img src={user.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',background:user.avatar_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:17,color:'#fff'}}>{user.display_name?.charAt(0)||'?'}</div>}
-        </div>
-      </nav>
+  const saveProfile = async () => {
+    await updateDoc(doc(db, 'profiles', user.uid), {
+      display_name: form.display_name,
+      bio: form.bio,
+      city: form.city,
+      updated_at: serverTimestamp()
+    })
+    const snap = await getDoc(doc(db, 'profiles', user.uid))
+    if (snap.exists()) setProfile(snap.data())
+    setEditing(false)
+  }
 
-      <div style={{flex:1,position:'relative',overflow:'hidden'}}>
+  const km = profile?.km_total || 0
+  const nextLevel = level < LEVEL_THRESHOLDS.length - 1 ? LEVEL_THRESHOLDS[level + 1] : null
+  const progress = nextLevel ? Math.min(100, ((km - LEVEL_THRESHOLDS[level]) / (nextLevel - LEVEL_THRESHOLDS[level])) * 100) : 100
 
-        {tab==='map'&&<>
-          {leaflet?<LeafletMap points={points} geo={geo} profiles={profiles} selectedId={selected?.id} battles={battles} addMode={addMode} onSelect={setSelected} onMapClick={({lat,lng})=>{setEditingPoint({lat,lng});setAddMode(false)}}/>:<div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100%',color:'#94a3b8'}}>Carregando mapa...</div>}
-          <GeoBar geo={geo}/>
-          <div style={{position:'absolute',bottom:56,left:'50%',transform:'translateX(-50%)',background:'rgba(79,70,229,0.9)',color:'#fff',borderRadius:20,padding:'5px 16px',fontSize:12,fontWeight:700,zIndex:1000,whiteSpace:'nowrap',display:'flex',alignItems:'center',gap:8}}>
-            <span>{getLevelEmblem(calcLevel(user.km_total||0))}</span>
-            <span>Nv.{calcLevel(user.km_total||0)} · {(user.km_total||0).toFixed(2)} km</span>
+  const rivalUser = myRivalry ? Object.entries(profiles).find(([id]) => id !== user.uid && myRivalry.players.includes(id)) : null
+
+  return (
+    <div style={{ height: '100%', overflowY: 'auto', background: '#f8fafc' }}>
+      <div style={{ background: 'linear-gradient(135deg,#1e293b,#0f172a)', padding: '20px 20px 30px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 16 }}>
+          <div style={{ width: 56, height: 56, borderRadius: '50%', background: myClan?.color || '#6366f1', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 26 }}>{myClan?.emoji || LEVEL_BADGES[level]}</div>
+          <div style={{ flex: 1 }}>
+            {editing ? (
+              <input value={form.display_name} onChange={e => setForm(f => ({...f, display_name: e.target.value}))} style={{ fontSize: 18, fontWeight: 900, background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, padding: '4px 10px', color: '#fff', width: '100%' }} />
+            ) : (
+              <div style={{ fontSize: 20, fontWeight: 900, color: '#f1f5f9' }}>{profile?.display_name}</div>
+            )}
+            <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 2 }}>{LEVEL_BADGES[level]} {LEVEL_TITLES[level]}</div>
           </div>
-          <NeighborhoodLoader loading={loadingNeighborhoods} status={neighborhoodStatus} count={points.length} geo={geo} onManualSync={()=>geo.lat&&syncArea(geo.lat,geo.lng,true)}/>
-          {user.is_admin&&<div style={{position:'absolute',top:16,left:16,display:'flex',gap:8,zIndex:1000}}>
-            <button onClick={()=>{setAddMode(!addMode);setEditingPoint(null)}} style={{background:addMode?'#4f46e5':'#fff',border:`2px solid ${addMode?'#4f46e5':'#e2e8f0'}`,borderRadius:12,color:addMode?'#fff':'#64748b',cursor:'pointer',padding:'9px 16px',display:'flex',alignItems:'center',gap:8,fontSize:12,fontWeight:700,boxShadow:'0 2px 8px rgba(0,0,0,0.1)'}}>
-              <I n="plus" s={14} c={addMode?'#fff':'#64748b'}/>{addMode?'Clique no mapa...':'+ Ponto'}
-            </button>
-            <button onClick={handleClearAndResync} style={{background:'#f0fdf4',border:'2px solid #86efac',borderRadius:12,color:'#166534',cursor:'pointer',padding:'9px 14px',display:'flex',alignItems:'center',gap:6,fontSize:12,fontWeight:700,boxShadow:'0 2px 8px rgba(0,0,0,0.1)'}}>
-              <I n="refresh" s={14} c="#166534"/> Reimportar bairros
-            </button>
-          </div>}
-          <Panel point={selected} geo={geo} user={user} battles={battles} profiles={profiles} onBattle={handleBattle} onCheckin={handleCheckin} onClose={()=>setSelected(null)} onEdit={pt=>setEditingPoint({point:pt})}/>
-        </>}
+          <button onClick={() => setEditing(!editing)} style={{ background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: 8, padding: '6px 12px', color: '#e2e8f0', fontSize: 12, cursor: 'pointer' }}>{editing ? 'Cancelar' : '✏️ Editar'}</button>
+        </div>
 
-        {editingPoint&&<div style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.4)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000,padding:16}}>
-          {editingPoint.point?
-            <PointForm initial={editingPoint.point} onSave={handleUpdatePoint} onCancel={()=>setEditingPoint(null)} onDelete={handleDeletePoint}/>:
-            <PointForm lat={editingPoint.lat} lng={editingPoint.lng} onSave={handleSaveNewPoint} onCancel={()=>setEditingPoint(null)}/>}
-        </div>}
+        {/* Level bar */}
+        <div style={{ marginBottom: 0 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+            <span style={{ fontSize: 11, color: '#94a3b8' }}>Nível {level}</span>
+            <span style={{ fontSize: 11, color: '#94a3b8' }}>{nextLevel ? `${km.toFixed(1)} / ${nextLevel} km` : 'Nível máximo!'}</span>
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.1)', borderRadius: 4, height: 6 }}>
+            <div style={{ height: '100%', width: `${progress}%`, background: 'linear-gradient(90deg,#ef4444,#f97316)', borderRadius: 4, transition: 'width 0.5s' }} />
+          </div>
+        </div>
+      </div>
 
-        {tab==='nearby'&&<div style={{overflowY:'auto',height:'100%',background:'#f8fafc',padding:24}}>
-          <div style={{marginBottom:20}}><div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:4}}>GEOLOCALIZAÇÃO</div><div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>Pontos Próximos</div>{geo.lat&&<div style={{fontSize:12,color:'#64748b',marginTop:4}}>±{Math.round(geo.acc||0)}m · {nearby.length} em 2km</div>}</div>
-          {geo.loading&&<div style={{color:'#d97706',background:'#fffbeb',padding:'12px 16px',borderRadius:10,fontSize:13}}>⏳ Aguardando GPS...</div>}
-          {geo.err&&<div style={{color:'#dc2626',background:'#fef2f2',padding:'12px 16px',borderRadius:10,fontSize:13}}>{geo.err}</div>}
-          {[...nearby].map(p=>({...p,_d:hav(geo.lat,geo.lng,p.lat,p.lng)})).sort((a,b)=>a._d-b._d).map(p=>{
-            const w=p._d<=p.radius_m,op=profiles[p.owner_id],oc=op?.avatar_color||p.owner_color||'#4f46e5'
-            return(<div key={p.id} onClick={()=>{setSelected(p);setTab('map')}} style={{background:'#fff',border:`1px solid ${w?'#86efac':'#e2e8f0'}`,borderRadius:14,padding:16,marginBottom:12,cursor:'pointer',boxShadow:'0 1px 4px rgba(0,0,0,0.05)'}}>
-              <div style={{display:'flex',justifyContent:'space-between',marginBottom:8}}>
-                <div><span style={{fontSize:10,fontWeight:700,color:TC[p.type]||'#64748b',background:TB[p.type]||'#f8fafc',padding:'2px 8px',borderRadius:20}}>{TL[p.type]||p.type}</span><div style={{fontSize:15,fontWeight:700,color:'#0f172a',marginTop:6}}>{p.name}</div></div>
-                <div style={{textAlign:'right'}}><div style={{fontSize:16,fontWeight:900,color:w?'#059669':'#0f172a'}}>{fmtD(p._d)}</div><div style={{fontSize:10,color:'#94a3b8'}}>raio {fmtD(p.radius_m)}</div></div>
-              </div>
-              <div style={{height:3,background:'#f1f5f9',borderRadius:2,overflow:'hidden',marginBottom:8}}><div style={{height:'100%',width:`${Math.min(100,(p._d/p.radius_m)*100)}%`,background:w?'#059669':'#4f46e5'}}/></div>
-              <div style={{display:'flex',justifyContent:'space-between',fontSize:11}}>
-                {p.owner_id?<span style={{color:'#64748b',display:'flex',alignItems:'center',gap:6}}><div style={{width:16,height:16,borderRadius:'50%',background:oc,display:'inline-flex',alignItems:'center',justifyContent:'center',fontSize:9,color:'#fff',fontWeight:900}}>{(op?.display_name||p.owner_name||'?').charAt(0)}</div>{op?.display_name||p.owner_name}</span>:<span style={{color:'#94a3b8'}}>🏳️ Livre</span>}
-                {w&&<span style={{color:'#059669',fontWeight:700}}>✓ DENTRO DO RAIO</span>}
-              </div>
-            </div>)
-          })}
-          {!geo.loading&&!geo.err&&nearby.length===0&&<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:40}}>Nenhum ponto em 2km.</div>}
-        </div>}
+      <div style={{ padding: 16 }}>
+        {editing && (
+          <div style={{ background: '#fff', borderRadius: 14, padding: 16, marginBottom: 14, border: '1px solid #e2e8f0' }}>
+            <input value={form.city} onChange={e => setForm(f => ({...f, city: e.target.value}))} placeholder="Cidade" style={{ width: '100%', padding: '8px 12px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, marginBottom: 8, boxSizing: 'border-box' }} />
+            <textarea value={form.bio} onChange={e => setForm(f => ({...f, bio: e.target.value}))} placeholder="Bio" rows={3} style={{ width: '100%', padding: '8px 12px', border: '1px solid #e2e8f0', borderRadius: 8, fontSize: 13, resize: 'none', marginBottom: 10, boxSizing: 'border-box' }} />
+            <button onClick={saveProfile} style={{ width: '100%', padding: '10px', background: '#6366f1', color: '#fff', border: 'none', borderRadius: 8, fontWeight: 700, cursor: 'pointer' }}>Salvar</button>
+          </div>
+        )}
 
-        {tab==='battles'&&<div style={{overflowY:'auto',height:'100%',background:'#f8fafc',padding:24}}>
-          <div style={{marginBottom:20}}><div style={{fontSize:11,fontWeight:700,color:'#dc2626',letterSpacing:2,marginBottom:4}}>CONFLITOS</div><div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>Batalhas Ativas</div></div>
-          {battles.length===0&&<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:40}}>Nenhuma batalha em andamento.</div>}
-          {battles.map(b=>{
-            const pt=points.find(p=>p.id===b.conquest_point_id),att=profiles[b.attacker_id],def=profiles[b.defender_id]
-            const tl=Math.max(0,(b.ends_at?.toDate?.()?.getTime()||b.ends_at)-Date.now()),attW=b.attacker_km>b.defender_km
-            const ac=att?.avatar_color||'#4f46e5',dc=def?.avatar_color||'#d97706'
-            return(<div key={b.id} style={{background:'#fff',border:'1px solid #fecaca',borderRadius:16,padding:18,marginBottom:14,boxShadow:'0 1px 4px rgba(0,0,0,0.05)'}}>
-              <div style={{display:'flex',justifyContent:'space-between',marginBottom:14}}>
-                <div><div style={{fontSize:11,fontWeight:700,color:'#dc2626',marginBottom:4}}>⚔️ BATALHA</div><div style={{fontSize:16,fontWeight:900,color:'#0f172a'}}>{pt?.name||'?'}</div></div>
-                <div style={{background:'#fffbeb',padding:'8px 12px',borderRadius:10,textAlign:'right'}}><div style={{fontSize:10,color:'#94a3b8',fontWeight:600}}>TERMINA EM</div><div style={{fontSize:14,fontWeight:700,color:'#d97706'}}>{fmtT(tl)}</div></div>
-              </div>
-              <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:12}}>
-                {[{u:att,n:b.attacker_name,km:b.attacker_km,c:ac},{u:def,n:b.defender_name,km:b.defender_km,c:dc}].map((x,i)=>(
-                  <div key={i} style={{flex:1,textAlign:'center'}}>
-                    <div style={{width:44,height:44,borderRadius:'50%',overflow:'hidden',margin:'0 auto 6px'}}>
-                      {x.u?.photo_url?<img src={x.u.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',background:x.c,display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,color:'#fff',fontSize:20}}>{(x.u?.display_name||x.n||'?').charAt(0)}</div>}
-                    </div>
-                    <div style={{fontSize:12,color:'#0f172a',fontWeight:600}}>{x.u?.display_name||x.n}</div>
-                    <div style={{fontSize:16,fontWeight:900,color:x.c}}>{x.km}km</div>
-                  </div>
-                ))}
-              </div>
-              <div style={{height:8,background:'#f1f5f9',borderRadius:4,overflow:'hidden',display:'flex',marginBottom:12}}>
-                <div style={{width:`${(b.attacker_km/(b.attacker_km+b.defender_km+0.01))*100}%`,background:ac}}/><div style={{flex:1,background:dc}}/>
-              </div>
-              <div style={{padding:'10px 14px',borderRadius:10,background:attW?'#fef2f2':'#f0fdf4',display:'flex',alignItems:'center',gap:8}}>
-                <I n={attW?'sword':'shield'} s={14} c={attW?'#dc2626':'#059669'}/>
-                <span style={{fontSize:12,color:attW?'#dc2626':'#059669',fontWeight:700}}>{attW?`${att?.display_name||b.attacker_name} está vencendo`:`${def?.display_name||b.defender_name} está defendendo`}</span>
-              </div>
-            </div>)
-          })}
-        </div>}
-
-        {tab==='ranking'&&<div style={{overflowY:'auto',height:'100%',background:'#f8fafc',padding:24}}>
-          <div style={{marginBottom:20}}><div style={{fontSize:11,fontWeight:700,color:'#4f46e5',letterSpacing:2,marginBottom:4}}>CLASSIFICAÇÃO</div><div style={{fontSize:22,fontWeight:900,color:'#0f172a'}}>Ranking Global</div></div>
-          {Object.entries(profiles).sort((a,b)=>(b[1].points||0)-(a[1].points||0)).map(([id,u],i)=>(
-            <div key={id} style={{background:id===user?.uid?'#eef2ff':'#fff',border:`1px solid ${id===user?.uid?'#c7d2fe':'#e2e8f0'}`,borderRadius:14,padding:'14px 16px',display:'flex',alignItems:'center',gap:14,marginBottom:10,boxShadow:'0 1px 4px rgba(0,0,0,0.04)'}}>
-              <div style={{width:30,fontSize:i<3?22:14,textAlign:'center',fontWeight:900}}>{i===0?'🥇':i===1?'🥈':i===2?'🥉':`#${i+1}`}</div>
-              <div style={{width:44,height:44,borderRadius:'50%',overflow:'hidden',flexShrink:0}}>
-                {u.photo_url?<img src={u.photo_url} style={{width:'100%',height:'100%',objectFit:'cover'}} alt=""/>:<div style={{width:'100%',height:'100%',background:u.avatar_color||'#4f46e5',display:'flex',alignItems:'center',justifyContent:'center',fontWeight:900,fontSize:19,color:'#fff'}}>{u.display_name?.charAt(0)||'?'}</div>}
-              </div>
-              <div style={{flex:1}}>
-                <div style={{fontSize:14,fontWeight:700,color:'#0f172a'}}>{u.display_name}</div>
-                <div style={{fontSize:11,color:'#64748b'}}>{(u.km_total||0).toFixed(1)} km · {points.filter(p=>p.owner_id===id).length} territórios</div>
-                <LevelBar km={u.km_total||0} size="small"/>
-              </div>
-              <div style={{textAlign:'right'}}><div style={{fontSize:20,fontWeight:900,color:'#4f46e5'}}>{u.points||0}</div><div style={{fontSize:10,color:'#94a3b8',fontWeight:600}}>pts</div></div>
+        {/* Stats */}
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 10, marginBottom: 14 }}>
+          {[['🏃', `${km.toFixed(1)}km`, 'KMs'], ['🚩', myPoints.length, 'Territórios'], ['⭐', profile?.points || 0, 'Pontos']].map(([ic, v, l]) => (
+            <div key={l} style={{ background: '#fff', borderRadius: 12, padding: '12px 8px', textAlign: 'center', border: '1px solid #f1f5f9' }}>
+              <div style={{ fontSize: 18, marginBottom: 4 }}>{ic}</div>
+              <div style={{ fontSize: 16, fontWeight: 900, color: '#0f172a' }}>{v}</div>
+              <div style={{ fontSize: 10, color: '#94a3b8' }}>{l}</div>
             </div>
           ))}
-          {Object.keys(profiles).length===0&&<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:40}}>Nenhum jogador ainda.</div>}
-        </div>}
+        </div>
 
-        {tab==='forum'&&<div style={{height:'100%',display:'flex',flexDirection:'column'}}><ForumView user={user}/></div>}
-        {tab==='conquistas'&&<AchievementsView user={user} points={points}/>}
-        {tab==='profile'&&<ProfileView user={user} points={points} onUpdate={u=>{setUser(u);setProfiles(p=>({...p,[u.uid]:u}))}}/>}
-        {tab==='admin'&&user?.is_admin&&<AdminView user={user} points={points}/>}
-
-        {showNotifs&&<div style={{position:'absolute',top:0,left:68,width:300,height:'100%',background:'#fff',zIndex:500,display:'flex',flexDirection:'column',boxShadow:'4px 0 20px rgba(0,0,0,0.1)'}}>
-          <div style={{padding:'16px 20px',borderBottom:'1px solid #e2e8f0',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-            <div style={{fontSize:16,fontWeight:900,color:'#0f172a'}}>Comunicados</div>
-            <button onClick={()=>setShowNotifs(false)} style={{background:'#f1f5f9',border:'none',borderRadius:8,padding:8,cursor:'pointer'}}><I n="x" s={16} c="#64748b"/></button>
+        {/* Clan */}
+        {myClan && (
+          <div style={{ background: `linear-gradient(135deg,${myClan.color}18,${myClan.color}08)`, borderRadius: 12, padding: '12px 14px', marginBottom: 14, border: `1px solid ${myClan.color}33`, display: 'flex', alignItems: 'center', gap: 12 }}>
+            <div style={{ width: 38, height: 38, borderRadius: '50%', background: myClan.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18 }}>{myClan.emoji}</div>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>{myClan.name}</div>
+              <div style={{ fontSize: 11, color: '#64748b' }}>{myClan.member_count} membros</div>
+            </div>
           </div>
-          <div style={{flex:1,overflowY:'auto',padding:16}}>
-            {notifications.length===0&&<div style={{color:'#94a3b8',fontSize:13,textAlign:'center',marginTop:20}}>Nenhum comunicado ainda.</div>}
-            {notifications.map(n=>{
-              const unread=!(n.read_by||[]).includes(user?.uid)
-              return(
-                <div key={n.id} onClick={async()=>{if(unread)await updateDoc(doc(db,'notifications',n.id),{read_by:[...(n.read_by||[]),user.uid]})}} style={{background:unread?'#fffbeb':'#f8fafc',border:`1px solid ${unread?'#fcd34d':'#e2e8f0'}`,borderRadius:12,padding:14,marginBottom:10,cursor:unread?'pointer':'default'}}>
-                  {unread&&<div style={{fontSize:9,fontWeight:700,color:'#d97706',marginBottom:4}}>NOVO</div>}
-                  <div style={{fontSize:14,fontWeight:700,color:'#0f172a',marginBottom:4}}>{n.title}</div>
-                  <div style={{fontSize:13,color:'#64748b',lineHeight:1.5,marginBottom:6}}>{n.message}</div>
-                  <div style={{fontSize:10,color:'#94a3b8'}}>De {n.from}</div>
+        )}
+
+        {/* Rivalry */}
+        {myRivalry && rivalUser && (
+          <div style={{ background: '#fef2f2', borderRadius: 12, padding: '12px 14px', marginBottom: 14, border: '1px solid #fecaca' }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#991b1b', marginBottom: 6 }}>⚔️ MAIOR RIVALIDADE</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>vs. {rivalUser[1].display_name}</div>
+                <div style={{ fontSize: 11, color: '#94a3b8' }}>{myRivalry.count} confrontos</div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: 16, fontWeight: 900, color: '#ef4444' }}>{myRivalry[`score_${user.uid}`] || 0} - {myRivalry[`score_${rivalUser[0]}`] || 0}</div>
+                <div style={{ fontSize: 10, color: '#94a3b8' }}>vitórias</div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ADM actions */}
+        {profile?.is_admin && (
+          <div style={{ background: '#fef3c7', borderRadius: 12, padding: '12px 14px', marginBottom: 14, border: '1px solid #fde68a' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#92400e', marginBottom: 8 }}>🔴 PAINEL ADM</div>
+            {!season ? (
+              <button onClick={onCreateSeason} style={{ width: '100%', padding: '8px', background: '#f59e0b', color: '#fff', border: 'none', borderRadius: 8, fontWeight: 700, fontSize: 13, cursor: 'pointer' }}>🏆 Iniciar Temporada</button>
+            ) : (
+              <div style={{ fontSize: 12, color: '#92400e' }}>Temporada ativa: {season.name}</div>
+            )}
+          </div>
+        )}
+
+        {/* My territories */}
+        {myPoints.length > 0 && (
+          <>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#64748b', marginBottom: 8, letterSpacing: 1 }}>MEUS TERRITÓRIOS</div>
+            {myPoints.map(p => {
+              const str = getStrength(p)
+              return (
+                <div key={p.id} style={{ background: '#fff', borderRadius: 10, padding: '10px 14px', marginBottom: 6, border: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <span style={{ fontSize: 16 }}>🚩</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: '#0f172a' }}>{p.name}</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+                      <div style={{ flex: 1, background: '#f1f5f9', borderRadius: 3, height: 4 }}>
+                        <div style={{ width: `${str}%`, height: '100%', background: str > 60 ? '#22c55e' : str > 30 ? '#f97316' : '#ef4444', borderRadius: 3 }} />
+                      </div>
+                      <span style={{ fontSize: 10, color: str > 60 ? '#166534' : '#9a3412', fontWeight: 700 }}>{str}%</span>
+                    </div>
+                  </div>
                 </div>
               )
             })}
-          </div>
-        </div>}
-        {toast&&<div style={{position:'absolute',bottom:20,left:'50%',transform:'translateX(-50%)',background:t.bg,border:`1px solid ${t.bo}`,borderRadius:12,padding:'12px 20px',zIndex:2000,fontSize:13,fontWeight:600,color:t.tx,boxShadow:'0 8px 32px rgba(0,0,0,0.12)',whiteSpace:'nowrap',animation:'su 0.3s ease'}}>{toast.msg}</div>}
+          </>
+        )}
+
+        <button onClick={onSignOut} style={{ width: '100%', padding: '12px', background: '#f8fafc', color: '#64748b', border: '1px solid #e2e8f0', borderRadius: 12, fontWeight: 600, fontSize: 14, cursor: 'pointer', marginTop: 8 }}>
+          Sair da conta
+        </button>
       </div>
-      <style>{`@keyframes su{from{opacity:0;transform:translateX(-50%) translateY(16px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}*{box-sizing:border-box}::-webkit-scrollbar{width:4px}::-webkit-scrollbar-thumb{background:#e2e8f0;border-radius:2px}input,select,textarea{color-scheme:light}`}</style>
+    </div>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// AUTH SCREEN
+// ══════════════════════════════════════════════════════════════════════════════
+function AuthScreen({ auth, db, showToast }) {
+  const [isLogin, setIsLogin] = useState(true)
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [name, setName] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const submit = async () => {
+    if (!email || !password) return showToast('Preencha todos os campos', 'err')
+    setLoading(true)
+    try {
+      if (isLogin) {
+        await signInWithEmailAndPassword(auth, email, password)
+      } else {
+        if (!name) return showToast('Nome obrigatório', 'err')
+        const { user } = await createUserWithEmailAndPassword(auth, email, password)
+        await setDoc(doc(db, 'profiles', user.uid), {
+          display_name: name,
+          username: email.split('@')[0],
+          email,
+          km_total: 0,
+          points: 0,
+          clan_id: null,
+          is_admin: false,
+          created_at: serverTimestamp()
+        })
+      }
+    } catch (err) {
+      showToast(err.code === 'auth/wrong-password' ? 'Senha incorreta' : err.code === 'auth/user-not-found' ? 'Usuário não encontrado' : err.message, 'err')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div style={{ minHeight: '100dvh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'linear-gradient(135deg,#1e293b,#0f172a)', padding: 24 }}>
+      <div style={{ marginBottom: 32, textAlign: 'center' }}>
+        <div style={{ fontSize: 48, marginBottom: 8 }}>⚔️</div>
+        <div style={{ fontSize: 32, fontWeight: 900, background: 'linear-gradient(135deg,#ef4444,#f97316)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent' }}>WAR MAPS</div>
+        <div style={{ fontSize: 13, color: '#64748b', marginTop: 6 }}>Conquiste sua cidade. Domine o mapa.</div>
+      </div>
+      <div style={{ background: '#fff', borderRadius: 20, padding: 28, width: '100%', maxWidth: 360, boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+        <div style={{ display: 'flex', background: '#f8fafc', borderRadius: 12, padding: 4, marginBottom: 20 }}>
+          {['Entrar', 'Cadastrar'].map((t, i) => (
+            <button key={t} onClick={() => setIsLogin(i === 0)} style={{ flex: 1, padding: '8px', background: isLogin === (i === 0) ? '#ef4444' : 'none', color: isLogin === (i === 0) ? '#fff' : '#64748b', border: 'none', borderRadius: 8, fontWeight: 700, fontSize: 14, cursor: 'pointer' }}>{t}</button>
+          ))}
+        </div>
+        {!isLogin && <input value={name} onChange={e => setName(e.target.value)} placeholder="Seu nome de guerra" style={{ width: '100%', padding: '12px 14px', border: '1px solid #e2e8f0', borderRadius: 10, fontSize: 14, marginBottom: 10, boxSizing: 'border-box' }} />}
+        <input value={email} onChange={e => setEmail(e.target.value)} placeholder="Email" type="email" style={{ width: '100%', padding: '12px 14px', border: '1px solid #e2e8f0', borderRadius: 10, fontSize: 14, marginBottom: 10, boxSizing: 'border-box' }} />
+        <input value={password} onChange={e => setPassword(e.target.value)} placeholder="Senha" type="password" onKeyDown={e => e.key === 'Enter' && submit()} style={{ width: '100%', padding: '12px 14px', border: '1px solid #e2e8f0', borderRadius: 10, fontSize: 14, marginBottom: 16, boxSizing: 'border-box' }} />
+        <button onClick={submit} disabled={loading} style={{ width: '100%', padding: 14, background: loading ? '#e2e8f0' : 'linear-gradient(135deg,#ef4444,#f97316)', color: loading ? '#94a3b8' : '#fff', border: 'none', borderRadius: 12, fontWeight: 800, fontSize: 16, cursor: loading ? 'not-allowed' : 'pointer' }}>
+          {loading ? '...' : isLogin ? '⚔️ ENTRAR NA GUERRA' : '🚀 COMEÇAR A DOMINAR'}
+        </button>
+      </div>
     </div>
   )
 }
